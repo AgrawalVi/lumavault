@@ -9,9 +9,15 @@ bin/
 *.out
 go.work
 
+# Generated Protobuf & Connect-RPC Stubs (run `make proto`)
+gen/
+sdk/web/src/gen/
+sdk/swift/Sources/LumaVaultSDK/Gen/
+
 # Swift / Xcode
 .build/
 .swiftpm/
+Package.resolved
 DerivedData/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/

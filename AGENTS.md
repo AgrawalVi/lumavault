@@ -7,11 +7,11 @@ Always read [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the full architecture a
 Each AI agent conversation works in an isolated **git worktree** mapped to a specific **Linear Issue** in the **Lumavault (`LUM`)** team.
 - **Artifact review before creating Linear issues:** When scoping a project or milestone, **never create issues in Linear directly**. First write the proposed Linear issues (titles, descriptions, owned paths, dependencies, and acceptance criteria) to a Markdown artifact for user comments and review, and wait for explicit approval before creating them in Linear.
 - **Stay strictly inside your issue's owned paths:** Do not edit files outside the directory/package assigned to your Linear issue unless the issue explicitly covers cross-package integration.
-- **Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and generated stubs (`make proto`).
+- **Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and regenerating stubs (`make proto`). Generated Protobuf stubs (`gen/go/`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`) are gitignored and generated on demand via `make proto`.
 
 | Linear Project | Owned Paths |
 | :--- | :--- |
-| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `.gitignore`, `go.*`, `gen/go/`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
+| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
 | **`P-LUM-2` Client SDKs (Web/TypeScript & Swift)** | `sdk/web/`, `sdk/swift/`, `Package.swift` |
 | **`P-LUM-3` LumaVault Photos** | `apps/photos/` |
 | **`P-LUM-4` LumaVault Cinema** | `apps/cinema/` |
