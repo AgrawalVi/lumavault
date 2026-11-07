@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package lumavault.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1;lumavaultv1";
+
+// Namespace partitions stored objects across the three LumaVault applications.
+enum Namespace {
+  NAMESPACE_UNSPECIFIED = 0;
+  NAMESPACE_PHOTOS = 1;
+  NAMESPACE_MOVIES_TV = 2;
+  NAMESPACE_GAMES = 3;
+}
+
+// SaveKind distinguishes battery-backed SRAM saves (.sav) from emulator save states (.svs).
+enum SaveKind {
+  SAVE_KIND_UNSPECIFIED = 0;
+  SAVE_KIND_BATTERY_SAV = 1;
+  SAVE_KIND_STATE_SVS = 2;
+}
+
+// ObjectMetadata represents the control-plane manifest and domain metadata for an immutable
+// content-addressed object stored in LumaVault. Raw chunk bytes never enter Protobuf messages;
+// they are transferred via the HTTP Data Plane (PUT/GET /v1/chunks/{sha256} and GET /v1/stream/{id}).
+message ObjectMetadata {
+  string id = 1;
+  Namespace namespace = 2;
+  string filename = 3;
+  string mime_type = 4;
+  uint64 size_bytes = 5;
+  // Fixed slice size (4MB-64MB) used for this object's chunks, allowing O(1) chunk index
+  // calculation (offset / chunk_size_bytes) during HTTP 206 byte-range streaming.
+  uint32 chunk_size_bytes = 6;
+  // Whole-file lowercase hex-encoded SHA-256 digest.
+  string sha256_digest = 7;
+  // Ordered list of lowercase hex-encoded SHA-256 digests for each chunk comprising the object.
+  repeated string chunk_hashes = 8;
+  // Optional SHA-256 chunk hash for the object's preview thumbnail blob.
+  string thumbnail_chunk_hash = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+
+  oneof domain_metadata {
+    PhotoMetadata photo_metadata = 12;
+    CinemaMetadata cinema_metadata = 13;
+    GameMetadata game_metadata = 14;
+  }
+}
+
+// PhotoMetadata stores EXIF, geolocation, album membership, and Apple Live Photo pairing.
+message PhotoMetadata {
+  // Links the still image (.heic/.jpg) and companion motion clip (.mov) of a Live Photo.
+  string live_photo_pair_id = 1;
+  google.protobuf.Timestamp taken_at = 2;
+  double latitude = 3;
+  double longitude = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+  string camera_make = 7;
+  string camera_model = 8;
+  repeated string album_ids = 9;
+}
+
+// CinemaMetadata stores TMDB catalog enrichment and cross-device playback state.
+message CinemaMetadata {
+  uint64 playback_position_ms = 1;
+  uint64 duration_ms = 2;
+  int64 tmdb_id = 3;
+  string title = 4;
+  string overview = 5;
+  string poster_url = 6;
+  string backdrop_url = 7;
+  uint32 release_year = 8;
+  uint32 season_number = 9;
+  uint32 episode_number = 10;
+}
+
+// GameMetadata stores console system identifiers, IGDB metadata, and versioned save lineage.
+message GameMetadata {
+  // Target system identifier (e.g., "GBA", "NDS", "N64", "SNES", "GBC", "NES").
+  string console = 1;
+  int64 igdb_id = 2;
+  string box_art_url = 3;
+  // Empty when this object is a ROM; set to the parent ROM's object_id for save files.
+  string parent_rom_object_id = 4;
+  // Monotonically increasing version number (1, 2, 3...) assigned atomically on CommitObject for saves.
+  uint32 save_version = 5;
+  SaveKind save_kind = 6;
+}
+
+// StorageService is the client-facing Control Plane RPC service for LumaVault.
+// Data-plane chunk transfers (PUT/GET /v1/chunks/{sha256}) and byte-range media streaming
+// (GET /v1/stream/{object_id}) are served over raw HTTP alongside this Connect-RPC service.
+service StorageService {
+  // Checks which of the candidate SHA-256 chunk hashes are not yet present in ChunkStore
+  // so clients only upload missing chunks via PUT /v1/chunks/{sha256}.
+  rpc HasChunks(HasChunksRequest) returns (HasChunksResponse);
+
+  // Commits an object manifest after all referenced chunks have been uploaded to ChunkStore.
+  // Idempotent on (namespace, sha256_digest) for photos and ROMs (parent_rom_object_id == "").
+  // Atomically assigns the next monotonic save_version when game_metadata.parent_rom_object_id is set.
+  rpc CommitObject(CommitObjectRequest) returns (CommitObjectResponse);
+
+  // Retrieves a single object's metadata and chunk manifest by ID.
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+
+  // Lists objects within a namespace with optional domain filters and cursor pagination.
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+
+  // Partially updates mutable object metadata fields using a FieldMask.
+  rpc UpdateObjectMetadata(UpdateObjectMetadataRequest) returns (UpdateObjectMetadataResponse);
+
+  // Deletes an object's metadata record from MetadataStore.
+  rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectResponse);
+}
+
+message HasChunksRequest {
+  repeated string chunk_hashes = 1;
+}
+
+message HasChunksResponse {
+  repeated string missing_chunk_hashes = 1;
+}
+
+message CommitObjectRequest {
+  Namespace namespace = 1;
+  string filename = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+  uint32 chunk_size_bytes = 5;
+  string sha256_digest = 6;
+  repeated string chunk_hashes = 7;
+  string thumbnail_chunk_hash = 8;
+
+  oneof domain_metadata {
+    PhotoMetadata photo_metadata = 9;
+    CinemaMetadata cinema_metadata = 10;
+    GameMetadata game_metadata = 11;
+  }
+}
+
+message CommitObjectResponse {
+  ObjectMetadata object = 1;
+  // True if an existing object with the same (namespace, sha256_digest) was returned without
+  // creating a duplicate record.
+  bool deduplicated = 2;
+}
+
+message GetObjectRequest {
+  string object_id = 1;
+}
+
+message GetObjectResponse {
+  ObjectMetadata object = 1;
+}
+
+message ListObjectsRequest {
+  Namespace namespace = 1;
+  string album_id = 2;
+  string parent_rom_object_id = 3;
+  string console = 4;
+  int32 page_size = 5;
+  string page_token = 6;
+}
+
+message ListObjectsResponse {
+  repeated ObjectMetadata objects = 1;
+  string next_page_token = 2;
+}
+
+message UpdateObjectMetadataRequest {
+  ObjectMetadata object = 1;
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+message UpdateObjectMetadataResponse {
+  ObjectMetadata object = 1;
+}
+
+message DeleteObjectRequest {
+  string object_id = 1;
+}
+
+message DeleteObjectResponse {}
