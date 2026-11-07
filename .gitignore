@@ -1,8 +1,8 @@
 # macOS
 .DS_Store
 
-# Go
-/bin/
+# Go & Compiled Binaries
+bin/
 /dist/
 *.exe
 *.test
@@ -22,10 +22,29 @@ sdk/web/dist/
 .turbo/
 
 # Local runtime data & secrets
-.env
-.env.*
+.lumavault/
+data/
+.env*
 !.env.example
-/data/
 *.db
 *.sqlite
 *.sqlite-*
+
+# Media, ROM, Save & BIOS files (Invariant #4: No Media in Git)
+*.rom
+*.gba
+*.nds
+*.n64
+*.sfc
+*.smc
+*.gb
+*.gbc
+*.nes
+*.sav
+*.svs
+*.mkv
+*.mp4
+*.mov
+*.heic
+*.bin
+*.bios

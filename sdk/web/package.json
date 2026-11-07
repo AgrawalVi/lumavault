@@ -1,0 +1,29 @@
+{
+  "name": "@lumavault/sdk",
+  "version": "0.1.0",
+  "description": "LumaVault Web & TypeScript Client SDK (Connect-ES + SHA-256 Chunking)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0",
+    "@connectrpc/connect": "^2.0.0",
+    "@connectrpc/connect-web": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
