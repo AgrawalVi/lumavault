@@ -2,15 +2,16 @@
 
 Always read [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the full architecture and system design.
 
-## 1. Multi-Worktree Ownership Rules
+## 1. Multi-Worktree Ownership & Linear Scoping Rules
 
 Each AI agent conversation works in an isolated **git worktree** mapped to a specific **Linear Issue** in the **Lumavault (`LUM`)** team.
+- **Artifact review before creating Linear issues:** When scoping a project or milestone, **never create issues in Linear directly**. First write the proposed Linear issues (titles, descriptions, owned paths, dependencies, and acceptance criteria) to a Markdown artifact for user comments and review, and wait for explicit approval before creating them in Linear.
 - **Stay strictly inside your issue's owned paths:** Do not edit files outside the directory/package assigned to your Linear issue unless the issue explicitly covers cross-package integration.
 - **Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and generated stubs (`make proto`).
 
 | Linear Project | Owned Paths |
 | :--- | :--- |
-| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
+| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `.gitignore`, `go.*`, `gen/go/`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
 | **`P-LUM-2` Client SDKs (Web/TypeScript & Swift)** | `sdk/web/`, `sdk/swift/`, `Package.swift` |
 | **`P-LUM-3` LumaVault Photos** | `apps/photos/` |
 | **`P-LUM-4` LumaVault Cinema** | `apps/cinema/` |
@@ -20,8 +21,8 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 ## 2. Core Architectural Invariants
 
 1. **Pluggable Backend Stores:** The Gateway (`pkg/gateway/`) talks **only** to the `MetadataStore` (`pkg/metadata/`) and `ChunkStore` (`pkg/chunkstore/`) Go interfaces—never directly to local disk files or Paxos/Chunkserver internals.
-2. **Content-Addressed Chunks:** Raw media bytes never enter `MetadataStore` or the Paxos log. All blobs are sliced into `SHA-256` verified chunks in `ChunkStore`.
-3. **Dual Client Support (Web + Swift):** The Gateway serves gRPC + Connect-RPC (`StorageService`) plus standard `HTTP 206 Partial Content` byte-range streaming (`GET /v1/stream/{object_id}`) so both `sdk/web` and `sdk/swift` work out of the box.
+2. **Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Raw media bytes never enter `MetadataStore`, the Paxos log, or Protobuf messages. All blobs are sliced into `SHA-256` verified chunks (`4MB–64MB`, with `chunk_size_bytes` recorded on `ObjectMetadata` for $O(1)$ byte-range seeking) and streamed directly via `PUT /v1/chunks/{sha256}` and `GET /v1/chunks/{sha256}` in `ChunkStore`.
+3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** A single `connectrpc/go` Gateway handler serves Connect, binary gRPC, and gRPC-Web for the Control Plane (`StorageService`: `HasChunks`, `CommitObject`, metadata queries), alongside raw HTTP Data Plane endpoints (`PUT /v1/chunks/{sha256}`, `GET /v1/chunks/{sha256}`, and `HTTP 206 Partial Content` `GET /v1/stream/{object_id}`) so both `sdk/web` (`@connectrpc/connect-web`) and `sdk/swift` (`connectrpc/swift`) work out of the box without separate `grpc-go` server boilerplate.
 4. **No Media in Git:** Never commit copyrighted media, ROMs, BIOS files, or `.env` secrets to the repository.
 
 ## 3. Standard Commands

@@ -13,8 +13,8 @@ LumaVault follows the architectural lineage of **Google File System (GFS / Colos
 | **Monorepo & Codegen** | **Buf** (`buf.yaml`) + `Makefile` + `go.mod` + `Package.swift` + `package.json` | Single source of truth for `.proto` contracts; generates Go server code, Swift client SDK (`sdk/swift`), and Web/TypeScript SDK (`sdk/web`). |
 | **Storage & Consensus Core** | **Go (Golang)** | High-concurrency network services, pluggable `MetadataStore` and `ChunkStore` interfaces, goroutine-based Paxos state machines, and high-throughput streaming. |
 | **Internal Node-to-Node API** | **gRPC + Protocol Buffers (`proto3`)** | Strictly-typed, low-overhead binary RPCs for Paxos voting (`Prepare`/`Promise`/`Accept`/`Accepted`) and inter-node chunk replication. |
-| **Client-Facing Gateway** | **gRPC + Connect-RPC + HTTP (`HTTP 206 Partial Content`)** | gRPC & Connect-RPC for metadata, chunk uploads, and library queries across Swift and Web; standard HTTP `Range: bytes=start-end` streaming (`GET /v1/stream/{id}`) for native `AVPlayer` and `<video>` 4K scrubbing. |
-| **Client SDKs & Ecosystem** | **Web/TypeScript (`sdk/web`)** + **Swift/SwiftUI (`sdk/swift`)** | `@lumavault/sdk` (Connect-ES + Web Crypto SHA-256 chunking) for Web/Node and `LumaVaultSDK` Swift Package for `iOS`, `iPadOS`, `tvOS`, and `macOS`. |
+| **Client-Facing Gateway** | **Connect-RPC (`connectrpc/go`) + HTTP Data Plane (`PUT/GET /v1/chunks/{sha256}` & `HTTP 206`)** | Single `connectrpc/go` handler serving Connect, gRPC, and gRPC-Web for the Control Plane (`HasChunks`, `CommitObject`, metadata queries — keeping all Protobuf messages `< 100 KB`); raw streaming HTTP for Data Plane chunk transfers (`PUT/GET /v1/chunks/{sha256}`) and `Range: bytes=start-end` streaming (`GET /v1/stream/{id}`) for native `AVPlayer` and `<video>` 4K scrubbing. |
+| **Client SDKs & Ecosystem** | **Web/TypeScript (`sdk/web`)** + **Swift/SwiftUI (`sdk/swift`)** | `@lumavault/sdk` (Connect-ES + Web Crypto SHA-256 chunking) for Web/Node and `LumaVaultSDK` Swift Package (`Connect-Swift` + `CryptoKit` + `URLSession` background chunk transfer) for `iOS`, `iPadOS`, `tvOS`, and `macOS`. |
 
 ```mermaid
 flowchart TD
@@ -26,8 +26,8 @@ flowchart TD
     end
 
     subgraph Gateway["API-First Client Gateway (Go)"]
-        RPC_API["gRPC + Connect-RPC StorageService<br/>(Metadata, Uploads, Sync, Saves)"]
-        HTTP_Stream["HTTP 206 Range Streamer<br/>(GET /v1/stream/{id})"]
+        RPC_API["Connect-RPC StorageService (Control Plane)<br/>(HasChunks, CommitObject, Metadata, Sync, Saves)"]
+        HTTP_Stream["HTTP Data Plane<br/>(PUT/GET /v1/chunks/{sha256} & HTTP 206 GET /v1/stream/{id})"]
         MetaIface["Pluggable MetadataStore Interface"]
         ChunkIface["Pluggable ChunkStore Interface"]
     end
@@ -69,16 +69,16 @@ flowchart TD
 > Rather than blocking SDKs and applications on distributed consensus, the Client Gateway talks strictly to two Go interfaces (`MetadataStore` for control-plane metadata and `ChunkStore` for content-addressed `SHA-256` data chunks). You start with a fast, local data layer (`LocalMetadataStore` + `LocalChunkStore`) and later drop in `PaxosMetadataStore` and `ReplicatedChunkStore` with zero changes to the Gateway, SDKs, or Apps.
 
 ### A. `ChunkStore` (The Data Plane: Chunking, Deduplication & Safety)
-1. **Fixed-Size Content-Addressed Chunks:** Files are split into immutable chunks (e.g., 4MB–64MB) plus small thumbnail blobs. Each chunk is addressed by its `SHA-256` digest.
-2. **Automatic Deduplication:** Identical chunks across duplicate photos, re-uploaded ROMs, or incremental game saves are uploaded and stored only once (`HasChunk` check before transfer).
+1. **Fixed-Size Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Files are split into immutable `4MB–64MB` chunks (e.g. `4MB` for photos/ROMs/saves, up to `64MB` for 4K remuxes) plus small thumbnail blobs. Raw chunk bytes are streamed directly over HTTP (`PUT /v1/chunks/{sha256}` and `GET /v1/chunks/{sha256}`) in `32KB` buffers so Protobuf messages stay `< 100KB` and server RAM usage stays `~32KB` per upload. Each chunk is addressed by its `SHA-256` digest, and `chunk_size_bytes` is persisted on `ObjectMetadata` so `HTTP 206` byte-range seeks compute the target chunk index (`offset / chunk_size_bytes`) in $O(1)$ without statting disk files.
+2. **Automatic Deduplication:** Identical chunks across duplicate photos, re-uploaded ROMs, or incremental game saves are uploaded and stored only once (`HasChunks` check via Connect-RPC before transfer). In addition, `CommitObject` is idempotent on `(namespace, sha256_digest)` for photos and ROMs so re-uploading the same file returns the existing `ObjectMetadata` instead of creating duplicate timeline entries.
 3. **Day-1 `LocalChunkStore` (`pkg/chunkstore/`):** Stores verified `SHA-256` chunk files on local disk/storage volume and supports sub-chunk byte-range reads for `HTTP 206` streaming.
 4. **Drop-In `ReplicatedChunkStore` (`pkg/chunkserver/`):**
    * **Replication Factor ($N = 3$):** Replicates each chunk across storage nodes over gRPC (`chunk.proto`).
    * **Bit-Rot Scrubbing:** Background workers periodically re-hash chunks on disk against their `SHA-256` identifier and heal corrupted blocks from healthy replicas.
-   * **Garbage Collection:** Reclaims unreferenced `SHA-256` chunks when objects are deleted or uploads fail before commit.
+   * **Garbage Collection:** Reclaims unreferenced `SHA-256` chunks whose `mtime` is older than a 24-hour grace window when objects are deleted or uploads fail before commit (preventing active multi-chunk uploads from having early chunks collected mid-upload), while `CommitObject` verifies all referenced chunks exist before writing metadata.
 
 ### B. `MetadataStore` (The Control Plane: Object Manifests & Pluggable Paxos)
-1. **Day-1 `LocalMetadataStore` (`pkg/metadata/`):** Persists object metadata, ordered chunk `SHA-256` manifests, Live Photo links (`live_photo_pair_id`), playback state (`playback_position_ms`), and monotonic game save versions (`v1`, `v2`, `v3`...) locally.
+1. **Day-1 `LocalMetadataStore` (`pkg/metadata/`):** Persists object metadata (`chunk_size_bytes`, whole-file `sha256_digest`, ordered chunk `SHA-256` manifests), partial updates via `google.protobuf.FieldMask` (`UpdateObjectMetadata`), Live Photo links (`live_photo_pair_id`), playback state (`playback_position_ms`), and monotonic game save versions (`v1`, `v2`, `v3`...) locally.
 2. **Drop-In `PaxosMetadataStore` (`pkg/consensus/`):**
    * **Single-Decree Paxos ("Basic Paxos"):** Phase 1 (`Prepare` / `Promise`) and Phase 2 (`Accept` / `Accepted`) with proposal numbers `(round, node_id)` for safety under network partitions and node crashes.
    * **Multi-Paxos (Continuous Replicated Log):** Elected stable leader streams Phase 2 `Accept` messages for deterministic state machine replication across nodes (`CreateObject`, `CommitChunks`, `DeleteObject`), with log compaction/snapshotting so ephemeral updates never bloat the log unboundedly.
@@ -93,7 +93,7 @@ Both SDKs are generated from `proto/lumavault/v1/storage.proto` via **Buf** and 
    * Uses the browser/Node **Web Crypto API (`crypto.subtle.digest('SHA-256', ...)`** to slice files, check existing chunks, upload missing chunks, and commit objects.
    * Provides URL helpers for `<video>` / `<audio>` `HTTP 206` range streaming.
 2. **Swift SDK (`sdk/swift/` — `LumaVaultSDK`):**
-   * Native Swift Package (`async`/`await`) supporting `iOS`, `iPadOS`, `tvOS`, and `macOS`.
+   * Native Swift Package (`async`/`await`) supporting `iOS`, `iPadOS`, `tvOS`, and `macOS` using **Connect-Swift (`connectrpc/swift`)** for Control Plane RPCs and `URLSession` (`uploadTask` / `dataTask`) for streaming `4MB–64MB` chunks in the background.
    * Uses Apple `CryptoKit` (`SHA256`) for background chunk slicing and deduplicated uploads, plus `AVPlayer` stream URL helpers.
 
 ---
@@ -130,7 +130,7 @@ Work is organized in Linear under team **Lumavault (`LUM`)** across 6 Projects d
 1. **`P-LUM-1` — 1. Core Backend, Contracts & Basic Data Layer**
    * `M1`: Monorepo & Buf Protobuf Contracts
    * `M2`: Basic Data Layer (`LocalMetadataStore` & `LocalChunkStore`)
-   * `M3`: Client Gateway (gRPC/Connect + `HTTP 206` Range Streamer)
+   * `M3`: Client Gateway (Connect-RPC Control Plane + HTTP Data Plane)
 2. **`P-LUM-2` — 2. Client SDKs (Web/TypeScript & Swift)**
    * `M1`: Web / TypeScript SDK (`sdk/web`)
    * `M2`: Swift SDK (`sdk/swift`)
@@ -171,7 +171,7 @@ lumavault/
 ├── pkg/
 │   ├── metadata/                     # MetadataStore interface + Day-1 LocalMetadataStore
 │   ├── chunkstore/                   # ChunkStore interface + Day-1 LocalChunkStore (SHA-256)
-│   ├── gateway/                      # Client gRPC/Connect-RPC + HTTP 206 Range Gateway
+│   ├── gateway/                      # Connect-RPC Control Plane + HTTP Data Plane (PUT/GET chunks & HTTP 206)
 │   ├── consensus/                    # Single-Decree & Multi-Paxos (PaxosMetadataStore)
 │   └── chunkserver/                  # Replicated chunk storage & bit-rot scrubber
 ├── sdk/
