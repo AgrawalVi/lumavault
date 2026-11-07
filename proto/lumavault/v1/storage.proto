@@ -11,7 +11,7 @@ option go_package = "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1;lumavaul
 enum Namespace {
   NAMESPACE_UNSPECIFIED = 0;
   NAMESPACE_PHOTOS = 1;
-  NAMESPACE_MOVIES_TV = 2;
+  NAMESPACE_CINEMA = 2;
   NAMESPACE_GAMES = 3;
 }
 

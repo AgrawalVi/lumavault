@@ -107,7 +107,7 @@ Both SDKs are generated from `proto/lumavault/v1/storage.proto` via **Buf** and 
   * Native **Apple Live Photos** support (linking the `.HEIC` still and `.mov` video clip via `live_photo_pair_id`).
   * Automatic background upload with `SHA-256` deduplication so photos are never uploaded twice.
 
-### App 2: LumaVault Cinema (`NAMESPACE_MOVIES_TV`)
+### App 2: LumaVault Cinema (`NAMESPACE_CINEMA`)
 * **Goal:** High-bitrate 4K HDR video streaming across **iPhone, iPad, Mac, Apple TV (`tvOS`), and Web**.
 * **Core Features:**
   * Instant scrubbing on large 4K files via `GET /v1/stream/{object_id}` using `HTTP 206 Partial Content` byte-range requests across chunk boundaries (remuxed MP4/MOV for native `AVPlayer` / Web or `MPVKit`/`VLCKit` for raw `.mkv`).
