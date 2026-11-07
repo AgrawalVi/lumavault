@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+go.work
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+
+# Node / Web SDK
+node_modules/
+sdk/web/dist/
+.turbo/
+
+# Local runtime data & secrets
+.env
+.env.*
+!.env.example
+/data/
+*.db
+*.sqlite
+*.sqlite-*
