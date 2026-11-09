@@ -26,7 +26,7 @@ const (
 )
 
 var (
-	// ErrObjectNotFound is returned when a requested object_id or parent_rom_object_id does not exist.
+	// ErrObjectNotFound is returned when a requested object_id does not exist.
 	ErrObjectNotFound = errors.New("metadata: object not found")
 
 	// ErrInvalidArgument is returned when a request fails validation, contains invalid SHA-256 digests,
@@ -34,31 +34,31 @@ var (
 	ErrInvalidArgument = errors.New("metadata: invalid argument")
 )
 
-// MetadataStore is the pluggable Control Plane storage contract for object manifests,
-// domain metadata, idempotent deduplication, monotonic game save versioning, and chunk
-// reference tracking.
+// MetadataStore is the pluggable Control Plane storage contract for content-addressed
+// object manifests, idempotent (namespace, sha256_digest) deduplication, storage-level
+// metadata updates, and chunk reference tracking.
+//
+// Application-layer domain metadata (albums/EXIF/Live Photos, TMDB catalog/playback state,
+// IGDB catalog/game save lineage) lives in the shared PostgreSQL application database
+// referencing ObjectMetadata.id.
 //
 // The Gateway (pkg/gateway) interacts exclusively with this interface, allowing seamless
 // upgrades from the Day-1 LocalMetadataStore to the Project 6 Multi-Paxos replicated store.
 type MetadataStore interface {
 	// CommitObject validates and commits an object manifest.
-	// It is idempotent on (namespace, sha256_digest) for NAMESPACE_PHOTOS and NAMESPACE_GAMES ROMs
-	// (where game_metadata.parent_rom_object_id is empty), returning the existing ObjectMetadata
-	// with deduplicated=true.
-	// When game_metadata.parent_rom_object_id is set on a NAMESPACE_GAMES object, CommitObject
-	// verifies the parent ROM exists and atomically assigns the next monotonic save_version (1, 2, 3...).
+	// By default it is idempotent on (namespace, sha256_digest), returning the existing
+	// ObjectMetadata with deduplicated=true unless req.SkipDedup is true.
 	CommitObject(ctx context.Context, req *lumavaultv1.CommitObjectRequest) (obj *lumavaultv1.ObjectMetadata, deduplicated bool, err error)
 
 	// GetObject retrieves a single object's metadata and chunk manifest by ID.
 	// Returns ErrObjectNotFound if the object does not exist.
 	GetObject(ctx context.Context, objectID string) (*lumavaultv1.ObjectMetadata, error)
 
-	// ListObjects lists objects within a required namespace with optional domain filters
-	// (album_id, parent_rom_object_id, console) and deterministic cursor pagination.
+	// ListObjects lists objects within a required namespace with deterministic cursor pagination.
 	ListObjects(ctx context.Context, req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.ListObjectsResponse, error)
 
-	// UpdateObjectMetadata partially updates mutable metadata fields on an existing object
-	// according to a required, non-empty google.protobuf.FieldMask.
+	// UpdateObjectMetadata partially updates mutable storage-level metadata fields
+	// (filename, mime_type, thumbnail_chunk_hash) according to a required, non-empty FieldMask.
 	UpdateObjectMetadata(ctx context.Context, req *lumavaultv1.UpdateObjectMetadataRequest) (*lumavaultv1.ObjectMetadata, error)
 
 	// DeleteObject deletes an object's metadata record and decrements its chunk reference counts.

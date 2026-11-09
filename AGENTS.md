@@ -19,7 +19,7 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 
 | Linear Project | Owned Paths |
 | :--- | :--- |
-| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
+| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `docker-compose.yml`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
 | **`P-LUM-2` Client SDKs (Web/TypeScript & Swift)** | `sdk/web/`, `sdk/swift/`, `Package.swift` |
 | **`P-LUM-3` LumaVault Photos** | `apps/photos/` |
 | **`P-LUM-4` LumaVault Cinema** | `apps/cinema/` |
@@ -28,9 +28,11 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 
 ## 2. Core Architectural Invariants
 
-1. **Pluggable Backend Stores:** The Gateway (`pkg/gateway/`) talks **only** to the `MetadataStore` (`pkg/metadata/`) and `ChunkStore` (`pkg/chunkstore/`) Go interfaces—never directly to local disk files or Paxos/Chunkserver internals.
-2. **Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Raw media bytes never enter `MetadataStore`, the Paxos log, or Protobuf messages. All blobs are sliced into `SHA-256` verified chunks (`4MB–64MB`, with `chunk_size_bytes` recorded on `ObjectMetadata` for $O(1)$ byte-range seeking) and streamed directly via `PUT /v1/chunks/{sha256}` and `GET /v1/chunks/{sha256}` in `ChunkStore`.
-3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** A single `connectrpc/go` Gateway handler serves Connect, binary gRPC, and gRPC-Web for the Control Plane (`StorageService`: `HasChunks`, `CommitObject`, metadata queries), alongside raw HTTP Data Plane endpoints (`PUT /v1/chunks/{sha256}`, `GET /v1/chunks/{sha256}`, and `HTTP 206 Partial Content` `GET /v1/stream/{object_id}`) so both `sdk/web` (`@connectrpc/connect-web`) and `sdk/swift` (`connectrpc/swift`) work out of the box without separate `grpc-go` server boilerplate.
+1. **Pure Storage Core vs. PostgreSQL Application Layer:**
+   - **LumaVault Storage Core (`pkg/gateway/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/consensus/`, `pkg/chunkserver/`):** Stores **only** content-addressed object manifests (`ObjectMetadata`: `id`, `namespace`, `filename`, `mime_type`, `size_bytes`, `chunk_size_bytes`, `sha256_digest`, `chunk_hashes`, `thumbnail_chunk_hash`, `created_at`, `updated_at`) and immutable `SHA-256` chunks. The Gateway talks **only** to the `MetadataStore` and `ChunkStore` Go interfaces—never directly to local disk files or Paxos/Chunkserver internals.
+   - **PostgreSQL Application Layer (`docker-compose.yml` + `apps/*`):** All application-specific domain metadata, relational queries, and mutable user state (Photo albums, EXIF, Live Photo pairing, trash retention; Cinema TMDB catalog, seasons/episodes, and `playback_position_ms` watch state; Arcade IGDB catalog, consoles, and monotonic save version lineage `v1, v2, v3...`) live in the shared **PostgreSQL** instance referencing `lumavault_object_id`.
+2. **Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Raw media bytes never enter `MetadataStore`, PostgreSQL, the Paxos log, or Protobuf messages. All blobs are sliced into `SHA-256` verified chunks (`4MB–64MB`, with `chunk_size_bytes` recorded on `ObjectMetadata` for $O(1)$ byte-range seeking) and streamed directly via `PUT /v1/chunks/{sha256}` and `GET /v1/chunks/{sha256}` in `ChunkStore`.
+3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** A single `connectrpc/go` Gateway handler serves Connect, binary gRPC, and gRPC-Web for the Storage Control Plane (`StorageService`: `HasChunks`, `CommitObject`, `GetObject`, `ListObjects`, `UpdateObjectMetadata`, `DeleteObject`), alongside raw HTTP Data Plane endpoints (`PUT /v1/chunks/{sha256}`, `GET /v1/chunks/{sha256}`, and `HTTP 206 Partial Content` `GET /v1/stream/{object_id}`) so both `sdk/web` (`@connectrpc/connect-web`) and `sdk/swift` (`connectrpc/swift`) work out of the box without separate `grpc-go` server boilerplate.
 4. **No Media in Git:** Never commit copyrighted media, ROMs, BIOS files, or `.env` secrets to the repository.
 
 ## 3. Standard Commands
