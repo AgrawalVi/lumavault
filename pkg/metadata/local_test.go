@@ -57,48 +57,6 @@ func TestCommitObject_Validation(t *testing.T) {
 			wantErr: ErrInvalidArgument,
 		},
 		{
-			name: "mismatched domain_metadata (cinema on photos)",
-			req: &lumavaultv1.CommitObjectRequest{
-				Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,
-				SizeBytes:      1024,
-				ChunkSizeBytes: 4 << 20,
-				Sha256Digest:   validDigest,
-				ChunkHashes:    []string{chunk0},
-				DomainMetadata: &lumavaultv1.CommitObjectRequest_CinemaMetadata{
-					CinemaMetadata: &lumavaultv1.CinemaMetadata{Title: "Wrong Domain"},
-				},
-			},
-			wantErr: ErrInvalidArgument,
-		},
-		{
-			name: "mismatched domain_metadata (photo on cinema)",
-			req: &lumavaultv1.CommitObjectRequest{
-				Namespace:      lumavaultv1.Namespace_NAMESPACE_CINEMA,
-				SizeBytes:      1024,
-				ChunkSizeBytes: 4 << 20,
-				Sha256Digest:   validDigest,
-				ChunkHashes:    []string{chunk0},
-				DomainMetadata: &lumavaultv1.CommitObjectRequest_PhotoMetadata{
-					PhotoMetadata: &lumavaultv1.PhotoMetadata{CameraMake: "Wrong Domain"},
-				},
-			},
-			wantErr: ErrInvalidArgument,
-		},
-		{
-			name: "mismatched domain_metadata (game on photos)",
-			req: &lumavaultv1.CommitObjectRequest{
-				Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,
-				SizeBytes:      1024,
-				ChunkSizeBytes: 4 << 20,
-				Sha256Digest:   validDigest,
-				ChunkHashes:    []string{chunk0},
-				DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-					GameMetadata: &lumavaultv1.GameMetadata{Console: "GBA"},
-				},
-			},
-			wantErr: ErrInvalidArgument,
-		},
-		{
 			name: "invalid sha256_digest",
 			req: &lumavaultv1.CommitObjectRequest{
 				Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,
@@ -176,23 +134,6 @@ func TestCommitObject_Validation(t *testing.T) {
 			},
 			wantErr: ErrInvalidArgument,
 		},
-		{
-			name: "game save referencing non-existent parent ROM",
-			req: &lumavaultv1.CommitObjectRequest{
-				Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-				SizeBytes:      256,
-				ChunkSizeBytes: 4 << 20,
-				Sha256Digest:   validDigest,
-				ChunkHashes:    []string{chunk0},
-				DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-					GameMetadata: &lumavaultv1.GameMetadata{
-						Console:           "GBA",
-						ParentRomObjectId: "missing-rom-id",
-					},
-				},
-			},
-			wantErr: ErrObjectNotFound,
-		},
 	}
 
 	for _, tc := range tests {
@@ -218,7 +159,7 @@ func TestCommitObject_Validation(t *testing.T) {
 	}
 }
 
-func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
+func TestCommitObject_DeduplicationSkipDedupChunkRefsAndPersistenceReload(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	rootDir := t.TempDir()
@@ -241,12 +182,6 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 		Sha256Digest:       photoDigest,
 		ChunkHashes:        []string{sharedChunk},
 		ThumbnailChunkHash: thumbChunk,
-		DomainMetadata: &lumavaultv1.CommitObjectRequest_PhotoMetadata{
-			PhotoMetadata: &lumavaultv1.PhotoMetadata{
-				CameraMake: "Apple",
-				AlbumIds:   []string{"favorites"},
-			},
-		},
 	}
 
 	first, dedup, err := store.CommitObject(ctx, req)
@@ -270,29 +205,30 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 		t.Fatalf("expected post-reload commit deduplicated=true with ID %q, got dedup=%v id=%q err=%v", first.Id, dedup, third.Id, err)
 	}
 
-	// Commit a Cinema object referencing sharedChunk and uniqueChunk.
-	cinemaReq := &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_CINEMA,
-		Filename:       "clip.mp4",
-		MimeType:       "video/mp4",
+	// Commit with SkipDedup=true (e.g. versioned game saves sharing identical bytes) creates distinct objects.
+	saveReq := &lumavaultv1.CommitObjectRequest{
+		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
+		Filename:       "emerald.sav",
+		MimeType:       "application/octet-stream",
 		SizeBytes:      8 << 20,
 		ChunkSizeBytes: 4 << 20,
-		Sha256Digest:   testHash("cinema-1"),
+		Sha256Digest:   testHash("save-1"),
 		ChunkHashes:    []string{sharedChunk, uniqueChunk},
+		SkipDedup:      true,
 	}
-	cinema1, dedup, err := store.CommitObject(ctx, cinemaReq)
+	save1, dedup, err := store.CommitObject(ctx, saveReq)
 	if err != nil || dedup {
-		t.Fatalf("cinema1 CommitObject: dedup=%v err=%v", dedup, err)
+		t.Fatalf("save1 CommitObject: dedup=%v err=%v", dedup, err)
 	}
-	cinema2, dedup, err := store.CommitObject(ctx, cinemaReq)
-	if err != nil || dedup || cinema2.Id == cinema1.Id {
-		t.Fatalf("expected cinema2 to create a distinct object without deduplication, got dedup=%v id=%s", dedup, cinema2.Id)
+	save2, dedup, err := store.CommitObject(ctx, saveReq)
+	if err != nil || dedup || save2.Id == save1.Id {
+		t.Fatalf("expected save2 with SkipDedup=true to create distinct object, got dedup=%v id=%s", dedup, save2.Id)
 	}
-	if err := store.DeleteObject(ctx, cinema2.Id); err != nil {
-		t.Fatalf("DeleteObject cinema2: %v", err)
+	if err := store.DeleteObject(ctx, save2.Id); err != nil {
+		t.Fatalf("DeleteObject save2: %v", err)
 	}
 
-	// Check chunk references while both first (photo) and cinema1 exist.
+	// Check chunk references while both first (photo) and save1 exist.
 	for _, h := range []string{sharedChunk, uniqueChunk, thumbChunk} {
 		ref, err := store.IsChunkReferenced(ctx, h)
 		if err != nil || !ref {
@@ -300,7 +236,7 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 		}
 	}
 
-	// Delete the photo object: thumbChunk becomes unreferenced, but sharedChunk remains referenced by cinema1.
+	// Delete the photo object: thumbChunk becomes unreferenced, but sharedChunk remains referenced by save1.
 	if err := store.DeleteObject(ctx, first.Id); err != nil {
 		t.Fatalf("DeleteObject first: %v", err)
 	}
@@ -308,7 +244,7 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 		t.Fatalf("expected thumbChunk to be unreferenced after photo deletion, got ref=%v err=%v", ref, err)
 	}
 	if ref, err := store.IsChunkReferenced(ctx, sharedChunk); err != nil || !ref {
-		t.Fatalf("expected sharedChunk to remain referenced by cinema1, got ref=%v err=%v", ref, err)
+		t.Fatalf("expected sharedChunk to remain referenced by save1, got ref=%v err=%v", ref, err)
 	}
 
 	// Re-committing the photo after deletion must create a new object (deduplicated=false).
@@ -319,8 +255,8 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 	if err := store.DeleteObject(ctx, recommitted.Id); err != nil {
 		t.Fatalf("DeleteObject recommitted: %v", err)
 	}
-	if err := store.DeleteObject(ctx, cinema1.Id); err != nil {
-		t.Fatalf("DeleteObject cinema1: %v", err)
+	if err := store.DeleteObject(ctx, save1.Id); err != nil {
+		t.Fatalf("DeleteObject save1: %v", err)
 	}
 
 	// Now sharedChunk and uniqueChunk must both be unreferenced.
@@ -331,197 +267,55 @@ func TestCommitObject_DeduplicationChunkRefsAndPersistenceReload(t *testing.T) {
 	}
 }
 
-func TestMonotonicGameSaveVersioning_ConcurrentAndPersistent(t *testing.T) {
+func TestConcurrentCommitsAndReads(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	rootDir := t.TempDir()
-
-	store, err := NewLocalMetadataStore(rootDir)
+	store, err := NewLocalMetadataStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewLocalMetadataStore: %v", err)
 	}
 
-	romChunk := testHash("emerald-rom-chunk")
-	romReq := &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-		Filename:       "emerald.gba",
-		SizeBytes:      16 << 20,
-		ChunkSizeBytes: 16 << 20,
-		Sha256Digest:   testHash("emerald-rom"),
-		ChunkHashes:    []string{romChunk},
-		DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-			GameMetadata: &lumavaultv1.GameMetadata{
-				Console: "GBA",
-				IgdbId:  1234,
-			},
-		},
-	}
-
-	romObj, dedup, err := store.CommitObject(ctx, romReq)
-	if err != nil || dedup {
-		t.Fatalf("CommitObject ROM: dedup=%v err=%v", dedup, err)
-	}
-	// Verify ROM deduplication on (NAMESPACE_GAMES, sha256_digest).
-	romDedup, dedup, err := store.CommitObject(ctx, romReq)
-	if err != nil || !dedup || romDedup.Id != romObj.Id {
-		t.Fatalf("expected ROM commit to deduplicate, got dedup=%v id=%q err=%v", dedup, romDedup.Id, err)
-	}
-
-	// Concurrent save commits against the same parent ROM.
-	const numConcurrentSaves = 10
+	const workers = 12
 	var wg sync.WaitGroup
-	versions := make(chan uint32, numConcurrentSaves)
-	saveIDs := make(chan string, numConcurrentSaves)
+	ids := make(chan string, workers)
 
-	for i := 0; i < numConcurrentSaves; i++ {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			saveChunk := testHash(fmt.Sprintf("save-chunk-%d", idx))
-			saveObj, dedup, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
+			chunk := testHash(fmt.Sprintf("concurrent-chunk-%d", idx))
+			obj, dedup, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
 				Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-				Filename:       "emerald.sav",
+				Filename:       fmt.Sprintf("save_%d.sav", idx),
 				SizeBytes:      65536,
 				ChunkSizeBytes: 4 << 20,
-				Sha256Digest:   testHash("identical-save-payload"),
-				ChunkHashes:    []string{saveChunk},
-				DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-					GameMetadata: &lumavaultv1.GameMetadata{
-						Console:           "GBA",
-						ParentRomObjectId: romObj.Id,
-						SaveKind:          lumavaultv1.SaveKind_SAVE_KIND_BATTERY_SAV,
-					},
-				},
+				Sha256Digest:   testHash("shared-save-digest"),
+				ChunkHashes:    []string{chunk},
+				SkipDedup:      true,
 			})
-			if err != nil {
-				t.Errorf("concurrent save %d failed: %v", idx, err)
+			if err != nil || dedup {
+				t.Errorf("worker %d: dedup=%v err=%v", idx, dedup, err)
 				return
 			}
-			if dedup {
-				t.Errorf("concurrent save %d unexpectedly deduplicated", idx)
-				return
-			}
-			versions <- saveObj.GetGameMetadata().GetSaveVersion()
-			saveIDs <- saveObj.Id
+			ids <- obj.Id
 		}(i)
 	}
 	wg.Wait()
-	close(versions)
-	close(saveIDs)
+	close(ids)
 
-	seen := make(map[uint32]bool)
-	for v := range versions {
-		if v < 1 || v > numConcurrentSaves || seen[v] {
-			t.Fatalf("unexpected or duplicate save_version %d (seen=%v)", v, seen)
+	seen := make(map[string]bool, workers)
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate object ID %q", id)
 		}
-		seen[v] = true
+		seen[id] = true
 	}
-
-	// Verify a save cannot be used as the parent_rom_object_id of another save.
-	var anySaveID string
-	for id := range saveIDs {
-		anySaveID = id
-		break
-	}
-	_, _, err = store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-		Filename:       "nested.sav",
-		SizeBytes:      1024,
-		ChunkSizeBytes: 4 << 20,
-		Sha256Digest:   testHash("nested-save"),
-		ChunkHashes:    []string{romChunk},
-		DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-			GameMetadata: &lumavaultv1.GameMetadata{
-				Console:           "GBA",
-				ParentRomObjectId: anySaveID,
-			},
-		},
-	})
-	if !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("expected ErrInvalidArgument when parent_rom_object_id points to a save, got %v", err)
-	}
-
-	// Paginate saves for the ROM using page_size=4 to exercise sortBySaveVersion cursor pagination.
-	savePage1, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
-		Namespace:         lumavaultv1.Namespace_NAMESPACE_GAMES,
-		ParentRomObjectId: romObj.Id,
-		PageSize:          4,
-	})
-	if err != nil || len(savePage1.Objects) != 4 || savePage1.NextPageToken == "" {
-		t.Fatalf("savePage1: len=%d token=%q err=%v", len(savePage1.Objects), savePage1.NextPageToken, err)
-	}
-	if savePage1.Objects[0].GetGameMetadata().GetSaveVersion() != 10 ||
-		savePage1.Objects[3].GetGameMetadata().GetSaveVersion() != 7 {
-		t.Fatalf("unexpected savePage1 versions: first=%d last=%d",
-			savePage1.Objects[0].GetGameMetadata().GetSaveVersion(),
-			savePage1.Objects[3].GetGameMetadata().GetSaveVersion())
-	}
-
-	// Passing a save-version page_token to a non-ParentRomObjectId query must return ErrInvalidArgument.
-	if _, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
-		Namespace: lumavaultv1.Namespace_NAMESPACE_GAMES,
-		PageToken: savePage1.NextPageToken,
-	}); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("expected ErrInvalidArgument when reusing save-version page_token on timestamp query, got %v", err)
-	}
-
-	savePage2, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
-		Namespace:         lumavaultv1.Namespace_NAMESPACE_GAMES,
-		ParentRomObjectId: romObj.Id,
-		PageSize:          4,
-		PageToken:         savePage1.NextPageToken,
-	})
-	if err != nil || len(savePage2.Objects) != 4 || savePage2.NextPageToken == "" {
-		t.Fatalf("savePage2: len=%d token=%q err=%v", len(savePage2.Objects), savePage2.NextPageToken, err)
-	}
-
-	savePage3, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
-		Namespace:         lumavaultv1.Namespace_NAMESPACE_GAMES,
-		ParentRomObjectId: romObj.Id,
-		PageSize:          4,
-		PageToken:         savePage2.NextPageToken,
-	})
-	if err != nil || len(savePage3.Objects) != 2 || savePage3.NextPageToken != "" {
-		t.Fatalf("savePage3: len=%d token=%q err=%v", len(savePage3.Objects), savePage3.NextPageToken, err)
-	}
-
-	// Delete the highest save (v10), reload store from disk, and verify next save gets v11 (monotonic!).
-	highestSaveID := savePage1.Objects[0].Id
-	if err := store.DeleteObject(ctx, highestSaveID); err != nil {
-		t.Fatalf("DeleteObject highestSaveID: %v", err)
-	}
-
-	reloaded, err := NewLocalMetadataStore(rootDir)
-	if err != nil {
-		t.Fatalf("NewLocalMetadataStore reload: %v", err)
-	}
-
-	nextSave, _, err := reloaded.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-		Filename:       "emerald.sav",
-		SizeBytes:      65536,
-		ChunkSizeBytes: 4 << 20,
-		Sha256Digest:   testHash("post-reload-save"),
-		ChunkHashes:    []string{romChunk},
-		DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-			GameMetadata: &lumavaultv1.GameMetadata{
-				Console:           "GBA",
-				ParentRomObjectId: romObj.Id,
-				SaveKind:          lumavaultv1.SaveKind_SAVE_KIND_BATTERY_SAV,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CommitObject post-reload save: %v", err)
-	}
-	wantVersion := uint32(numConcurrentSaves + 1)
-	if nextSave.GetGameMetadata().GetSaveVersion() != wantVersion {
-		t.Fatalf("expected monotonic save_version=%d after deleting v%d and reloading, got %d",
-			wantVersion, numConcurrentSaves, nextSave.GetGameMetadata().GetSaveVersion())
+	if len(seen) != workers {
+		t.Fatalf("expected %d committed objects, got %d", workers, len(seen))
 	}
 }
 
-func TestListObjects_FilteringAndPagination(t *testing.T) {
+func TestListObjects_NamespaceFilteringAndPagination(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, err := NewLocalMetadataStore(t.TempDir())
@@ -531,10 +325,6 @@ func TestListObjects_FilteringAndPagination(t *testing.T) {
 
 	chunk := testHash("photo-chunk")
 	for i := 0; i < 5; i++ {
-		albums := []string{"all"}
-		if i%2 == 0 {
-			albums = append(albums, "even")
-		}
 		_, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
 			Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,
 			Filename:       fmt.Sprintf("photo_%d.jpg", i),
@@ -542,51 +332,30 @@ func TestListObjects_FilteringAndPagination(t *testing.T) {
 			ChunkSizeBytes: 4 << 20,
 			Sha256Digest:   testHash(fmt.Sprintf("photo-digest-%d", i)),
 			ChunkHashes:    []string{chunk},
-			DomainMetadata: &lumavaultv1.CommitObjectRequest_PhotoMetadata{
-				PhotoMetadata: &lumavaultv1.PhotoMetadata{
-					AlbumIds: albums,
-				},
-			},
 		})
 		if err != nil {
 			t.Fatalf("CommitObject %d: %v", i, err)
 		}
 	}
 
-	// Commit two ROMs on different consoles ("GBA" and "SNES") to test Console filtering.
-	for _, console := range []string{"GBA", "SNES"} {
-		_, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
-			Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-			Filename:       console + ".rom",
-			SizeBytes:      1024,
-			ChunkSizeBytes: 4 << 20,
-			Sha256Digest:   testHash("rom-" + console),
-			ChunkHashes:    []string{chunk},
-			DomainMetadata: &lumavaultv1.CommitObjectRequest_GameMetadata{
-				GameMetadata: &lumavaultv1.GameMetadata{Console: console},
-			},
-		})
-		if err != nil {
-			t.Fatalf("CommitObject ROM %s: %v", console, err)
-		}
+	// Commit an object in NAMESPACE_GAMES to verify namespace isolation.
+	if _, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
+		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
+		Filename:       "emerald.gba",
+		SizeBytes:      1024,
+		ChunkSizeBytes: 4 << 20,
+		Sha256Digest:   testHash("rom-gba"),
+		ChunkHashes:    []string{chunk},
+	}); err != nil {
+		t.Fatalf("CommitObject ROM: %v", err)
 	}
 
-	snesResp, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
+	gamesResp, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
 		Namespace: lumavaultv1.Namespace_NAMESPACE_GAMES,
-		Console:   "SNES",
 		PageSize:  999, // clamped to MaxPageSize
 	})
-	if err != nil || len(snesResp.Objects) != 1 || snesResp.Objects[0].GetGameMetadata().GetConsole() != "SNES" {
-		t.Fatalf("expected 1 SNES object, got %+v (err=%v)", snesResp, err)
-	}
-
-	// Filter by album_id = "even" (should match 3 photos: 0, 2, 4).
-	evenResp, err := store.ListObjects(ctx, &lumavaultv1.ListObjectsRequest{
-		Namespace: lumavaultv1.Namespace_NAMESPACE_PHOTOS,
-		AlbumId:   "even",
-	})
-	if err != nil || len(evenResp.Objects) != 3 {
-		t.Fatalf("expected 3 objects in 'even' album, got %v (err=%v)", len(evenResp.Objects), err)
+	if err != nil || len(gamesResp.Objects) != 1 || gamesResp.Objects[0].Filename != "emerald.gba" {
+		t.Fatalf("expected 1 game object, got %+v (err=%v)", gamesResp, err)
 	}
 
 	// Paginate all 5 photos with page_size = 2, and delete the boundary item after page 1
@@ -645,7 +414,7 @@ func TestListObjects_FilteringAndPagination(t *testing.T) {
 	}
 }
 
-func TestUpdateObjectMetadata_AllDomainFieldMasks(t *testing.T) {
+func TestUpdateObjectMetadata_FieldMask(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, err := NewLocalMetadataStore(t.TempDir())
@@ -657,7 +426,6 @@ func TestUpdateObjectMetadata_AllDomainFieldMasks(t *testing.T) {
 	oldThumb := testHash("thumb-old")
 	newThumb := testHash("thumb-new")
 
-	// 1. Photo object initially committed without PhotoMetadata to test lazy initialization + all photo_metadata.* paths.
 	photo, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
 		Namespace:          lumavaultv1.Namespace_NAMESPACE_PHOTOS,
 		Filename:           "before.jpg",
@@ -672,53 +440,35 @@ func TestUpdateObjectMetadata_AllDomainFieldMasks(t *testing.T) {
 		t.Fatalf("CommitObject photo: %v", err)
 	}
 
-	takenAt := timestamppb.New(time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC))
+	// Reject empty update_mask or immutable fields.
+	if _, err := store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
+		Object:     &lumavaultv1.ObjectMetadata{Id: photo.Id, Filename: "ignored.jpg"},
+		UpdateMask: &fieldmaskpb.FieldMask{},
+	}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty update_mask, got %v", err)
+	}
+	if _, err := store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
+		Object:     &lumavaultv1.ObjectMetadata{Id: photo.Id, SizeBytes: 9999},
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"size_bytes"}},
+	}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on immutable field size_bytes, got %v", err)
+	}
+
 	updatedPhoto, err := store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
 		Object: &lumavaultv1.ObjectMetadata{
 			Id:                 photo.Id,
 			Filename:           "after.heic",
 			MimeType:           "image/heic",
 			ThumbnailChunkHash: newThumb,
-			DomainMetadata: &lumavaultv1.ObjectMetadata_PhotoMetadata{
-				PhotoMetadata: &lumavaultv1.PhotoMetadata{
-					LivePhotoPairId: "pair-123",
-					TakenAt:         takenAt,
-					Latitude:        37.7749,
-					Longitude:       -122.4194,
-					Width:           4032,
-					Height:          3024,
-					CameraMake:      "Apple",
-					CameraModel:     "iPhone 16 Pro",
-					AlbumIds:        []string{"vacation", "highlights"},
-				},
-			},
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{
-			Paths: []string{
-				"filename",
-				"mime_type",
-				"thumbnail_chunk_hash",
-				"photo_metadata.live_photo_pair_id",
-				"photo_metadata.taken_at",
-				"photo_metadata.latitude",
-				"photo_metadata.longitude",
-				"photo_metadata.width",
-				"photo_metadata.height",
-				"photo_metadata.camera_make",
-				"photo_metadata.camera_model",
-				"photo_metadata.album_ids",
-			},
+			Paths: []string{"filename", "mime_type", "thumbnail_chunk_hash"},
 		},
 	})
 	if err != nil {
-		t.Fatalf("UpdateObjectMetadata photo fields: %v", err)
+		t.Fatalf("UpdateObjectMetadata: %v", err)
 	}
-	pm := updatedPhoto.GetPhotoMetadata()
-	if updatedPhoto.Filename != "after.heic" || updatedPhoto.MimeType != "image/heic" ||
-		pm.GetCameraMake() != "Apple" || pm.GetCameraModel() != "iPhone 16 Pro" ||
-		pm.GetWidth() != 4032 || pm.GetHeight() != 3024 ||
-		pm.GetLatitude() != 37.7749 || pm.GetLongitude() != -122.4194 ||
-		pm.GetLivePhotoPairId() != "pair-123" || len(pm.GetAlbumIds()) != 2 {
+	if updatedPhoto.Filename != "after.heic" || updatedPhoto.MimeType != "image/heic" || updatedPhoto.ThumbnailChunkHash != newThumb {
 		t.Fatalf("unexpected updatedPhoto: %+v", updatedPhoto)
 	}
 
@@ -728,191 +478,6 @@ func TestUpdateObjectMetadata_AllDomainFieldMasks(t *testing.T) {
 	}
 	if ref, err := store.IsChunkReferenced(ctx, newThumb); err != nil || !ref {
 		t.Fatalf("expected newThumb referenced, got ref=%v err=%v", ref, err)
-	}
-
-	// Whole-submessage replacement & nil clearing for photo_metadata.
-	updatedPhoto, err = store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object:     &lumavaultv1.ObjectMetadata{Id: photo.Id},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"photo_metadata"}},
-	})
-	if err != nil || updatedPhoto.GetPhotoMetadata() != nil {
-		t.Fatalf("expected photo_metadata to be cleared to nil, got %+v (err=%v)", updatedPhoto.GetPhotoMetadata(), err)
-	}
-	updatedPhoto, err = store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object: &lumavaultv1.ObjectMetadata{
-			Id: photo.Id,
-			DomainMetadata: &lumavaultv1.ObjectMetadata_PhotoMetadata{
-				PhotoMetadata: &lumavaultv1.PhotoMetadata{CameraMake: "Sony"},
-			},
-		},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"photo_metadata"}},
-	})
-	if err != nil || updatedPhoto.GetPhotoMetadata().GetCameraMake() != "Sony" {
-		t.Fatalf("expected whole photo_metadata replacement, got %+v (err=%v)", updatedPhoto.GetPhotoMetadata(), err)
-	}
-
-	// 2. Cinema object: test lazy initialization + all cinema_metadata.* paths + whole replacement/clearing.
-	cinema, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_CINEMA,
-		Filename:       "movie.mkv",
-		SizeBytes:      4096,
-		ChunkSizeBytes: 4 << 20,
-		Sha256Digest:   testHash("cinema-update-test"),
-		ChunkHashes:    []string{chunk},
-	})
-	if err != nil {
-		t.Fatalf("CommitObject cinema: %v", err)
-	}
-
-	updatedCinema, err := store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object: &lumavaultv1.ObjectMetadata{
-			Id: cinema.Id,
-			DomainMetadata: &lumavaultv1.ObjectMetadata_CinemaMetadata{
-				CinemaMetadata: &lumavaultv1.CinemaMetadata{
-					PlaybackPositionMs: 120000,
-					DurationMs:         7200000,
-					TmdbId:             603,
-					Title:              "The Matrix",
-					Overview:           "Sci-fi classic",
-					PosterUrl:          "https://image.tmdb.org/poster.jpg",
-					BackdropUrl:        "https://image.tmdb.org/backdrop.jpg",
-					ReleaseYear:        1999,
-					SeasonNumber:       1,
-					EpisodeNumber:      2,
-				},
-			},
-		},
-		UpdateMask: &fieldmaskpb.FieldMask{
-			Paths: []string{
-				"cinema_metadata.playback_position_ms",
-				"cinema_metadata.duration_ms",
-				"cinema_metadata.tmdb_id",
-				"cinema_metadata.title",
-				"cinema_metadata.overview",
-				"cinema_metadata.poster_url",
-				"cinema_metadata.backdrop_url",
-				"cinema_metadata.release_year",
-				"cinema_metadata.season_number",
-				"cinema_metadata.episode_number",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("UpdateObjectMetadata cinema fields: %v", err)
-	}
-	cm := updatedCinema.GetCinemaMetadata()
-	if cm.GetTitle() != "The Matrix" || cm.GetTmdbId() != 603 || cm.GetPlaybackPositionMs() != 120000 ||
-		cm.GetDurationMs() != 7200000 || cm.GetReleaseYear() != 1999 ||
-		cm.GetSeasonNumber() != 1 || cm.GetEpisodeNumber() != 2 ||
-		cm.GetPosterUrl() == "" || cm.GetBackdropUrl() == "" || cm.GetOverview() == "" {
-		t.Fatalf("unexpected updatedCinema: %+v", cm)
-	}
-
-	// Whole-submessage clear & replace for cinema_metadata.
-	updatedCinema, err = store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object:     &lumavaultv1.ObjectMetadata{Id: cinema.Id},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"cinema_metadata"}},
-	})
-	if err != nil || updatedCinema.GetCinemaMetadata() != nil {
-		t.Fatalf("expected cinema_metadata cleared to nil, got %+v (err=%v)", updatedCinema.GetCinemaMetadata(), err)
-	}
-	updatedCinema, err = store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object: &lumavaultv1.ObjectMetadata{
-			Id: cinema.Id,
-			DomainMetadata: &lumavaultv1.ObjectMetadata_CinemaMetadata{
-				CinemaMetadata: &lumavaultv1.CinemaMetadata{Title: "Reloaded"},
-			},
-		},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"cinema_metadata"}},
-	})
-	if err != nil || updatedCinema.GetCinemaMetadata().GetTitle() != "Reloaded" {
-		t.Fatalf("expected whole cinema_metadata replacement, got %+v (err=%v)", updatedCinema.GetCinemaMetadata(), err)
-	}
-
-	// 3. Game object (ROM + Save): test lazy initialization + all game_metadata.* paths + immutability checks.
-	game, _, err := store.CommitObject(ctx, &lumavaultv1.CommitObjectRequest{
-		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
-		Filename:       "zelda.gba",
-		SizeBytes:      4096,
-		ChunkSizeBytes: 4 << 20,
-		Sha256Digest:   testHash("game-update-test"),
-		ChunkHashes:    []string{chunk},
-	})
-	if err != nil {
-		t.Fatalf("CommitObject game: %v", err)
-	}
-
-	updatedGame, err := store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object: &lumavaultv1.ObjectMetadata{
-			Id: game.Id,
-			DomainMetadata: &lumavaultv1.ObjectMetadata_GameMetadata{
-				GameMetadata: &lumavaultv1.GameMetadata{
-					Console:   "GBA",
-					IgdbId:    999,
-					BoxArtUrl: "https://images.igdb.com/zelda.jpg",
-					SaveKind:  lumavaultv1.SaveKind_SAVE_KIND_BATTERY_SAV,
-				},
-			},
-		},
-		UpdateMask: &fieldmaskpb.FieldMask{
-			Paths: []string{
-				"game_metadata.console",
-				"game_metadata.igdb_id",
-				"game_metadata.box_art_url",
-				"game_metadata.save_kind",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("UpdateObjectMetadata game fields: %v", err)
-	}
-	gm := updatedGame.GetGameMetadata()
-	if gm.GetConsole() != "GBA" || gm.GetIgdbId() != 999 || gm.GetBoxArtUrl() == "" ||
-		gm.GetSaveKind() != lumavaultv1.SaveKind_SAVE_KIND_BATTERY_SAV {
-		t.Fatalf("unexpected updatedGame: %+v", gm)
-	}
-
-	// Reject mutating immutable game_metadata.parent_rom_object_id or game_metadata.save_version via whole submessage or direct path.
-	for _, badMask := range []*lumavaultv1.UpdateObjectMetadataRequest{
-		{
-			Object:     &lumavaultv1.ObjectMetadata{Id: game.Id},
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"game_metadata.save_version"}},
-		},
-		{
-			Object:     &lumavaultv1.ObjectMetadata{Id: game.Id},
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"game_metadata.parent_rom_object_id"}},
-		},
-		{
-			Object: &lumavaultv1.ObjectMetadata{
-				Id: game.Id,
-				DomainMetadata: &lumavaultv1.ObjectMetadata_GameMetadata{
-					GameMetadata: &lumavaultv1.GameMetadata{ParentRomObjectId: "other-rom"},
-				},
-			},
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"game_metadata"}},
-		},
-		{
-			Object: &lumavaultv1.ObjectMetadata{
-				Id: game.Id,
-				DomainMetadata: &lumavaultv1.ObjectMetadata_GameMetadata{
-					GameMetadata: &lumavaultv1.GameMetadata{SaveVersion: 5},
-				},
-			},
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"game_metadata"}},
-		},
-	} {
-		if _, err := store.UpdateObjectMetadata(ctx, badMask); !errors.Is(err, ErrInvalidArgument) {
-			t.Fatalf("expected ErrInvalidArgument for immutable game_metadata mutation, got %v", err)
-		}
-	}
-
-	// Clearing game_metadata to nil on a ROM sets DomainMetadata to nil.
-	updatedGame, err = store.UpdateObjectMetadata(ctx, &lumavaultv1.UpdateObjectMetadataRequest{
-		Object:     &lumavaultv1.ObjectMetadata{Id: game.Id},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"game_metadata"}},
-	})
-	if err != nil || updatedGame.GetGameMetadata() != nil {
-		t.Fatalf("expected ROM game_metadata cleared to nil, got %+v (err=%v)", updatedGame.GetGameMetadata(), err)
 	}
 }
 
@@ -932,11 +497,6 @@ func TestEngine_RestoreDeterminismAndDeepCloneIsolation(t *testing.T) {
 		ChunkSizeBytes: 4 << 20,
 		Sha256Digest:   testHash("clone-digest"),
 		ChunkHashes:    []string{chunk},
-		DomainMetadata: &lumavaultv1.CommitObjectRequest_PhotoMetadata{
-			PhotoMetadata: &lumavaultv1.PhotoMetadata{
-				AlbumIds: []string{"album-1"},
-			},
-		},
 	}
 
 	committed, _, err := store.CommitObject(ctx, req)
@@ -948,19 +508,16 @@ func TestEngine_RestoreDeterminismAndDeepCloneIsolation(t *testing.T) {
 	req.ChunkHashes[0] = "corrupted-in-caller"
 	committed.Filename = "corrupted-filename"
 	committed.ChunkHashes[0] = "corrupted-in-response"
-	committed.GetPhotoMetadata().AlbumIds[0] = "corrupted-album"
 
 	fetched, err := store.GetObject(ctx, committed.Id)
 	if err != nil {
 		t.Fatalf("GetObject: %v", err)
 	}
-	if fetched.Filename != "immutable.jpg" || fetched.ChunkHashes[0] != chunk ||
-		fetched.GetPhotoMetadata().GetAlbumIds()[0] != "album-1" {
+	if fetched.Filename != "immutable.jpg" || fetched.ChunkHashes[0] != chunk {
 		t.Fatalf("caller mutation leaked into store state: %+v", fetched)
 	}
 
-	// Test Engine.Restore validation (rejecting nil, empty ID, and duplicate IDs without wiping existing state)
-	// and deterministic DeleteObject fallback when two restored objects share (namespace, sha256_digest).
+	// Test Engine.Restore validation and deterministic DeleteObject fallback when two restored objects share (namespace, sha256_digest).
 	eng := NewEngine()
 	sharedDigest := testHash("dup-photo-digest")
 	t1 := timestamppb.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -980,7 +537,7 @@ func TestEngine_RestoreDeterminismAndDeepCloneIsolation(t *testing.T) {
 		ChunkSizeBytes: 4 << 20,
 		Sha256Digest:   sharedDigest,
 		ChunkHashes:    []string{chunk},
-		CreatedAt:      t1, // identical timestamp to test Id ASC tie-breaking
+		CreatedAt:      t1,
 	}
 	objC := &lumavaultv1.ObjectMetadata{
 		Id:             "obj-c",
@@ -992,19 +549,18 @@ func TestEngine_RestoreDeterminismAndDeepCloneIsolation(t *testing.T) {
 		CreatedAt:      t1,
 	}
 
-	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{objC, objA, objB}, nil); err != nil {
+	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{objC, objA, objB}); err != nil {
 		t.Fatalf("Engine.Restore: %v", err)
 	}
 
 	// Failed Restore (duplicate ID) must not wipe existing state in eng.
-	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{objA, objA}, nil); !errors.Is(err, ErrInvalidArgument) {
+	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{objA, objA}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument on duplicate ID in Restore, got %v", err)
 	}
-	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{nil}, nil); !errors.Is(err, ErrInvalidArgument) {
+	if err := eng.Restore([]*lumavaultv1.ObjectMetadata{nil}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument on nil object in Restore, got %v", err)
 	}
 
-	// Because Restore sorts by (CreatedAt ASC, Id ASC), "obj-a" must be the active deduplication target.
 	// Deleting "obj-a" must deterministically promote "obj-b" (not "obj-c").
 	if err := eng.DeleteObject("obj-a"); err != nil {
 		t.Fatalf("eng.DeleteObject(obj-a): %v", err)
@@ -1029,7 +585,6 @@ func TestLocalMetadataStore_DiskErrorsContextAndCleanup(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
-	// Pre-populate an orphaned file in tmp/ and verify NewLocalMetadataStore removes it.
 	tmpDir := filepath.Join(rootDir, "tmp")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll tmp: %v", err)
@@ -1047,7 +602,6 @@ func TestLocalMetadataStore_DiskErrorsContextAndCleanup(t *testing.T) {
 		t.Fatalf("expected orphan temp file to be cleaned up on startup, got err=%v", err)
 	}
 
-	// Verify cancelled context handling on all 6 MetadataStore methods.
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -1070,7 +624,6 @@ func TestLocalMetadataStore_DiskErrorsContextAndCleanup(t *testing.T) {
 		t.Fatalf("expected context.Canceled on IsChunkReferenced, got %v", err)
 	}
 
-	// Verify unsafe object IDs and invalid hash errors.
 	ctx := context.Background()
 	if _, err := store.GetObject(ctx, "../unsafe"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument on unsafe GetObject ID, got %v", err)
@@ -1085,7 +638,6 @@ func TestLocalMetadataStore_DiskErrorsContextAndCleanup(t *testing.T) {
 		t.Fatalf("expected ErrInvalidArgument on IsChunkReferenced bad hash, got %v", err)
 	}
 
-	// Verify loadFromDisk rejects a .pb file whose filename does not match its embedded ObjectMetadata.Id.
 	badObjBytes, err := proto.Marshal(&lumavaultv1.ObjectMetadata{Id: "embedded-id"})
 	if err != nil {
 		t.Fatalf("proto.Marshal: %v", err)

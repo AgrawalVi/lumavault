@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,12 +22,10 @@ var _ MetadataStore = (*LocalMetadataStore)(nil)
 // LocalMetadataStore is the Day-1 filesystem-backed MetadataStore implementation.
 // It delegates deterministic validation, indexing, and reference counting to an in-memory
 // Engine protected by a sync.RWMutex, and persists one atomic binary Protobuf file per object
-// under <rootDir>/objects/<id>.pb alongside high-water game save version counters in
-// <rootDir>/save_versions.json.
+// under <rootDir>/objects/<id>.pb.
 type LocalMetadataStore struct {
-	objectsDir       string
-	tmpDir           string
-	saveVersionsPath string
+	objectsDir string
+	tmpDir     string
 
 	mu     sync.RWMutex
 	engine *Engine
@@ -44,7 +41,6 @@ func NewLocalMetadataStore(rootDir string) (*LocalMetadataStore, error) {
 	cleanRoot := filepath.Clean(rootDir)
 	objectsDir := filepath.Join(cleanRoot, "objects")
 	tmpDir := filepath.Join(cleanRoot, "tmp")
-	saveVersionsPath := filepath.Join(cleanRoot, "save_versions.json")
 
 	if err := os.MkdirAll(objectsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("metadata: create objects dir: %w", err)
@@ -58,10 +54,9 @@ func NewLocalMetadataStore(rootDir string) (*LocalMetadataStore, error) {
 	}
 
 	s := &LocalMetadataStore{
-		objectsDir:       objectsDir,
-		tmpDir:           tmpDir,
-		saveVersionsPath: saveVersionsPath,
-		engine:           NewEngine(),
+		objectsDir: objectsDir,
+		tmpDir:     tmpDir,
+		engine:     NewEngine(),
 	}
 
 	if err := s.loadFromDisk(); err != nil {
@@ -89,13 +84,6 @@ func (s *LocalMetadataStore) CommitObject(ctx context.Context, req *lumavaultv1.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	parentROMID := req.GetGameMetadata().GetParentRomObjectId()
-	isGameSave := req.Namespace == lumavaultv1.Namespace_NAMESPACE_GAMES && parentROMID != ""
-	var prevSaveVer uint32
-	if isGameSave {
-		prevSaveVer = s.engine.saveVersions[parentROMID]
-	}
-
 	obj, deduplicated, err := s.engine.CommitObject(req, id, now)
 	if err != nil {
 		return nil, false, err
@@ -104,25 +92,8 @@ func (s *LocalMetadataStore) CommitObject(ctx context.Context, req *lumavaultv1.
 		return obj, true, nil
 	}
 
-	// Persist high-water save_versions.json first (if this was a game save) so a crash
-	// never allows a version number to be reused.
-	if isGameSave {
-		if err := s.writeSaveVersionsLocked(); err != nil {
-			_ = s.engine.DeleteObject(obj.Id)
-			s.engine.setSaveVersion(parentROMID, prevSaveVer)
-			return nil, false, err
-		}
-	}
-
 	if err := s.writeObjectFile(obj); err != nil {
 		_ = s.engine.DeleteObject(obj.Id)
-		if isGameSave {
-			s.engine.setSaveVersion(parentROMID, prevSaveVer)
-			if rbErr := s.writeSaveVersionsLocked(); rbErr != nil {
-				// Keep in-memory high-water mark aligned with save_versions.json on disk.
-				s.engine.setSaveVersion(parentROMID, obj.GetGameMetadata().GetSaveVersion())
-			}
-		}
 		return nil, false, err
 	}
 
@@ -141,7 +112,7 @@ func (s *LocalMetadataStore) GetObject(ctx context.Context, objectID string) (*l
 	return s.engine.GetObject(objectID)
 }
 
-// ListObjects lists objects within a namespace with optional domain filters and cursor pagination.
+// ListObjects lists objects within a namespace with deterministic cursor pagination.
 func (s *LocalMetadataStore) ListObjects(ctx context.Context, req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.ListObjectsResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -153,8 +124,9 @@ func (s *LocalMetadataStore) ListObjects(ctx context.Context, req *lumavaultv1.L
 	return s.engine.ListObjects(req)
 }
 
-// UpdateObjectMetadata partially updates mutable object metadata fields using a FieldMask
-// and atomically persists the updated ObjectMetadata to disk.
+// UpdateObjectMetadata partially updates mutable storage-level metadata fields
+// (filename, mime_type, thumbnail_chunk_hash) using a FieldMask and atomically persists
+// the updated ObjectMetadata to disk.
 func (s *LocalMetadataStore) UpdateObjectMetadata(ctx context.Context, req *lumavaultv1.UpdateObjectMetadataRequest) (*lumavaultv1.ObjectMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -224,15 +196,6 @@ func (s *LocalMetadataStore) IsChunkReferenced(ctx context.Context, hash string)
 }
 
 func (s *LocalMetadataStore) loadFromDisk() error {
-	saveVersions := make(map[string]uint32)
-	if data, err := os.ReadFile(s.saveVersionsPath); err == nil {
-		if err := json.Unmarshal(data, &saveVersions); err != nil {
-			return fmt.Errorf("metadata: unmarshal save_versions.json: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("metadata: read save_versions.json: %w", err)
-	}
-
 	entries, err := os.ReadDir(s.objectsDir)
 	if err != nil {
 		return fmt.Errorf("metadata: read objects dir: %w", err)
@@ -259,7 +222,7 @@ func (s *LocalMetadataStore) loadFromDisk() error {
 		objects = append(objects, obj)
 	}
 
-	return s.engine.Restore(objects, saveVersions)
+	return s.engine.Restore(objects)
 }
 
 func (s *LocalMetadataStore) objectFilePath(objectID string) string {
@@ -275,15 +238,6 @@ func (s *LocalMetadataStore) writeObjectFile(obj *lumavaultv1.ObjectMetadata) er
 		return fmt.Errorf("metadata: marshal object %s: %w", obj.Id, err)
 	}
 	return s.writeFileAtomic(s.objectFilePath(obj.Id), raw)
-}
-
-func (s *LocalMetadataStore) writeSaveVersionsLocked() error {
-	snapshot := s.engine.saveVersionsSnapshot()
-	raw, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("metadata: marshal save_versions.json: %w", err)
-	}
-	return s.writeFileAtomic(s.saveVersionsPath, raw)
 }
 
 func (s *LocalMetadataStore) writeFileAtomic(destPath string, data []byte) (retErr error) {

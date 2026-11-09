@@ -22,40 +22,36 @@ type dedupKey struct {
 
 // pageCursor encodes the deterministic pagination position for ListObjects.
 type pageCursor struct {
-	CreatedAtNanos int64  `json:"t,omitempty"`
-	SaveVersion    uint32 `json:"v,omitempty"`
-	BySaveVersion  bool   `json:"s,omitempty"`
+	CreatedAtNanos int64  `json:"t"`
 	ID             string `json:"id"`
 }
 
-// Engine is a pure deterministic in-memory metadata state machine.
+// Engine is a pure deterministic in-memory metadata state machine for LumaVault Core.
 // All mutating transitions accept explicit objectID and timestamp arguments and perform
 // zero disk or network I/O, allowing LocalMetadataStore (Day 1) and PaxosMetadataStore (Project 6)
-// to share identical validation, deduplication, save versioning, indexing, and chunk refcounting.
+// to share identical validation, deduplication, indexing, and chunk refcounting.
 //
 // Callers must synchronize access to Engine externally (e.g., via sync.RWMutex or a single-threaded
 // consensus apply loop).
 type Engine struct {
-	objects      map[string]*lumavaultv1.ObjectMetadata
-	dedupIndex   map[dedupKey]string
-	saveVersions map[string]uint32
-	chunkRefs    map[string]int
+	objects    map[string]*lumavaultv1.ObjectMetadata
+	dedupIndex map[dedupKey]string
+	chunkRefs  map[string]int
 }
 
 // NewEngine returns an initialized, empty deterministic metadata Engine.
 func NewEngine() *Engine {
 	return &Engine{
-		objects:      make(map[string]*lumavaultv1.ObjectMetadata),
-		dedupIndex:   make(map[dedupKey]string),
-		saveVersions: make(map[string]uint32),
-		chunkRefs:    make(map[string]int),
+		objects:    make(map[string]*lumavaultv1.ObjectMetadata),
+		dedupIndex: make(map[dedupKey]string),
+		chunkRefs:  make(map[string]int),
 	}
 }
 
-// Restore populates the Engine from persisted objects and high-water save version counters.
+// Restore populates the Engine from persisted objects.
 // All inputs are validated before replacing the Engine's state; if an error is returned,
 // the existing Engine state remains untouched.
-func (e *Engine) Restore(objects []*lumavaultv1.ObjectMetadata, saveVersions map[string]uint32) error {
+func (e *Engine) Restore(objects []*lumavaultv1.ObjectMetadata) error {
 	sorted := make([]*lumavaultv1.ObjectMetadata, len(objects))
 	seenIDs := make(map[string]struct{}, len(objects))
 	for i, obj := range objects {
@@ -75,43 +71,26 @@ func (e *Engine) Restore(objects []*lumavaultv1.ObjectMetadata, saveVersions map
 	})
 
 	newObjects := make(map[string]*lumavaultv1.ObjectMetadata, len(sorted))
-	newDedup := make(map[dedupKey]string)
-	newSaveVersions := make(map[string]uint32, len(saveVersions))
+	newDedup := make(map[dedupKey]string, len(sorted))
 	newChunkRefs := make(map[string]int)
-
-	for romID, ver := range saveVersions {
-		if ver > 0 {
-			newSaveVersions[romID] = ver
-		}
-	}
 
 	for _, obj := range sorted {
 		newObjects[obj.Id] = obj
-		if isDeduplicatable(obj.Namespace, obj.GetGameMetadata()) {
-			key := dedupKey{namespace: obj.Namespace, sha256: obj.Sha256Digest}
-			if _, exists := newDedup[key]; !exists {
-				newDedup[key] = obj.Id
-			}
-		}
-		if obj.Namespace == lumavaultv1.Namespace_NAMESPACE_GAMES {
-			if romID := obj.GetGameMetadata().GetParentRomObjectId(); romID != "" {
-				if ver := obj.GetGameMetadata().GetSaveVersion(); ver > newSaveVersions[romID] {
-					newSaveVersions[romID] = ver
-				}
-			}
+		key := dedupKey{namespace: obj.Namespace, sha256: obj.Sha256Digest}
+		if _, exists := newDedup[key]; !exists {
+			newDedup[key] = obj.Id
 		}
 		adjustChunkRefsMap(newChunkRefs, obj, +1)
 	}
 
 	e.objects = newObjects
 	e.dedupIndex = newDedup
-	e.saveVersions = newSaveVersions
 	e.chunkRefs = newChunkRefs
 	return nil
 }
 
-// CommitObject validates req and either returns an existing deduplicated object or commits
-// a new ObjectMetadata record with the supplied objectID and timestamp.
+// CommitObject validates req and either returns an existing deduplicated object (when !req.SkipDedup)
+// or commits a new ObjectMetadata record with the supplied objectID and timestamp.
 func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID string, now time.Time) (*lumavaultv1.ObjectMetadata, bool, error) {
 	if req == nil {
 		return nil, false, fmt.Errorf("%w: request is nil", ErrInvalidArgument)
@@ -123,19 +102,8 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 		return nil, false, err
 	}
 
-	parentROMID := req.GetGameMetadata().GetParentRomObjectId()
-	isGameSave := req.Namespace == lumavaultv1.Namespace_NAMESPACE_GAMES && parentROMID != ""
-
-	if isGameSave {
-		parentObj, ok := e.objects[parentROMID]
-		if !ok {
-			return nil, false, fmt.Errorf("%w: parent_rom_object_id %q does not exist", ErrObjectNotFound, parentROMID)
-		}
-		if parentObj.Namespace != lumavaultv1.Namespace_NAMESPACE_GAMES || parentObj.GetGameMetadata().GetParentRomObjectId() != "" {
-			return nil, false, fmt.Errorf("%w: parent_rom_object_id %q is not a ROM in NAMESPACE_GAMES", ErrInvalidArgument, parentROMID)
-		}
-	} else if isDeduplicatable(req.Namespace, req.GetGameMetadata()) {
-		key := dedupKey{namespace: req.Namespace, sha256: req.Sha256Digest}
+	key := dedupKey{namespace: req.Namespace, sha256: req.Sha256Digest}
+	if !req.SkipDedup {
 		if existingID, ok := e.dedupIndex[key]; ok {
 			if existingObj, exists := e.objects[existingID]; exists {
 				return cloneObject(existingObj), true, nil
@@ -163,38 +131,11 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 		UpdatedAt:          cloneTimestamp(ts),
 	}
 
-	switch dm := req.DomainMetadata.(type) {
-	case *lumavaultv1.CommitObjectRequest_PhotoMetadata:
-		if dm.PhotoMetadata != nil {
-			obj.DomainMetadata = &lumavaultv1.ObjectMetadata_PhotoMetadata{
-				PhotoMetadata: proto.Clone(dm.PhotoMetadata).(*lumavaultv1.PhotoMetadata),
-			}
-		}
-	case *lumavaultv1.CommitObjectRequest_CinemaMetadata:
-		if dm.CinemaMetadata != nil {
-			obj.DomainMetadata = &lumavaultv1.ObjectMetadata_CinemaMetadata{
-				CinemaMetadata: proto.Clone(dm.CinemaMetadata).(*lumavaultv1.CinemaMetadata),
-			}
-		}
-	case *lumavaultv1.CommitObjectRequest_GameMetadata:
-		if dm.GameMetadata != nil {
-			gm := proto.Clone(dm.GameMetadata).(*lumavaultv1.GameMetadata)
-			if isGameSave {
-				nextVer := e.saveVersions[parentROMID] + 1
-				e.saveVersions[parentROMID] = nextVer
-				gm.SaveVersion = nextVer
-			} else {
-				gm.SaveVersion = 0
-			}
-			obj.DomainMetadata = &lumavaultv1.ObjectMetadata_GameMetadata{
-				GameMetadata: gm,
-			}
-		}
-	}
-
 	e.objects[objectID] = obj
-	if isDeduplicatable(obj.Namespace, obj.GetGameMetadata()) {
-		e.dedupIndex[dedupKey{namespace: obj.Namespace, sha256: obj.Sha256Digest}] = objectID
+	if !req.SkipDedup {
+		e.dedupIndex[key] = objectID
+	} else if _, exists := e.dedupIndex[key]; !exists {
+		e.dedupIndex[key] = objectID
 	}
 	adjustChunkRefsMap(e.chunkRefs, obj, +1)
 
@@ -213,7 +154,7 @@ func (e *Engine) GetObject(objectID string) (*lumavaultv1.ObjectMetadata, error)
 	return cloneObject(obj), nil
 }
 
-// ListObjects filters, sorts, and paginates objects within a required namespace.
+// ListObjects filters, sorts (created_at DESC, id ASC), and paginates objects within a required namespace.
 func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.ListObjectsResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("%w: request is nil", ErrInvalidArgument)
@@ -232,10 +173,9 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 		pageSize = MaxPageSize
 	}
 
-	sortBySaveVersion := req.ParentRomObjectId != ""
 	var cursor *pageCursor
 	if req.PageToken != "" {
-		c, err := decodePageToken(req.PageToken, sortBySaveVersion)
+		c, err := decodePageToken(req.PageToken)
 		if err != nil {
 			return nil, err
 		}
@@ -247,35 +187,17 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 		if obj.Namespace != req.Namespace {
 			continue
 		}
-		if req.AlbumId != "" {
-			pm := obj.GetPhotoMetadata()
-			if pm == nil || !slices.Contains(pm.AlbumIds, req.AlbumId) {
-				continue
-			}
-		}
-		if req.ParentRomObjectId != "" {
-			gm := obj.GetGameMetadata()
-			if gm == nil || gm.ParentRomObjectId != req.ParentRomObjectId {
-				continue
-			}
-		}
-		if req.Console != "" {
-			gm := obj.GetGameMetadata()
-			if gm == nil || gm.Console != req.Console {
-				continue
-			}
-		}
 		matched = append(matched, obj)
 	}
 
 	sort.Slice(matched, func(i, j int) bool {
-		return compareObjectsDesc(matched[i], matched[j], sortBySaveVersion) < 0
+		return compareObjectsDesc(matched[i], matched[j]) < 0
 	})
 
 	startIdx := 0
 	if cursor != nil {
 		startIdx = sort.Search(len(matched), func(i int) bool {
-			return isAfterCursor(matched[i], cursor, sortBySaveVersion)
+			return isAfterCursor(matched[i], cursor)
 		})
 	}
 
@@ -287,7 +209,7 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 	var nextToken string
 	if endIdx < len(matched) {
 		last := matched[endIdx-1]
-		nextToken = encodePageToken(last, sortBySaveVersion)
+		nextToken = encodePageToken(last)
 	} else {
 		endIdx = len(matched)
 	}
@@ -303,7 +225,8 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 	}, nil
 }
 
-// UpdateObjectMetadata applies a partial update to an existing object using req.UpdateMask.
+// UpdateObjectMetadata applies a partial update to mutable storage-level metadata fields
+// (filename, mime_type, thumbnail_chunk_hash) using req.UpdateMask.
 func (e *Engine) UpdateObjectMetadata(req *lumavaultv1.UpdateObjectMetadataRequest, now time.Time) (*lumavaultv1.ObjectMetadata, error) {
 	if req == nil || req.Object == nil || !isSafeObjectID(req.Object.Id) {
 		return nil, fmt.Errorf("%w: object and valid object.id are required", ErrInvalidArgument)
@@ -321,7 +244,7 @@ func (e *Engine) UpdateObjectMetadata(req *lumavaultv1.UpdateObjectMetadataReque
 	src := req.Object
 
 	for _, path := range req.UpdateMask.Paths {
-		if err := applyFieldMaskPath(updated, existing, src, path); err != nil {
+		if err := applyFieldMaskPath(updated, src, path); err != nil {
 			return nil, err
 		}
 	}
@@ -339,7 +262,6 @@ func (e *Engine) UpdateObjectMetadata(req *lumavaultv1.UpdateObjectMetadataReque
 }
 
 // DeleteObject removes objectID from the Engine and updates deduplication and chunk reference indexes.
-// High-water save_version counters are intentionally preserved so deleted save versions are never reused.
 func (e *Engine) DeleteObject(objectID string) error {
 	if !isSafeObjectID(objectID) {
 		return fmt.Errorf("%w: invalid object_id %q", ErrInvalidArgument, objectID)
@@ -351,25 +273,21 @@ func (e *Engine) DeleteObject(objectID string) error {
 
 	delete(e.objects, objectID)
 
-	if isDeduplicatable(existing.Namespace, existing.GetGameMetadata()) {
-		key := dedupKey{namespace: existing.Namespace, sha256: existing.Sha256Digest}
-		if e.dedupIndex[key] == objectID {
-			delete(e.dedupIndex, key)
-			// Deterministically select the earliest remaining object with the same (namespace, sha256)
-			// using the same (CreatedAt ASC, Id ASC) ordering as Restore.
-			var best *lumavaultv1.ObjectMetadata
-			for _, candidate := range e.objects {
-				if candidate.Namespace == existing.Namespace &&
-					candidate.Sha256Digest == existing.Sha256Digest &&
-					isDeduplicatable(candidate.Namespace, candidate.GetGameMetadata()) {
-					if best == nil || compareObjectsAsc(candidate, best) < 0 {
-						best = candidate
-					}
+	key := dedupKey{namespace: existing.Namespace, sha256: existing.Sha256Digest}
+	if e.dedupIndex[key] == objectID {
+		delete(e.dedupIndex, key)
+		// Deterministically select the earliest remaining object with the same (namespace, sha256)
+		// using the same (CreatedAt ASC, Id ASC) ordering as Restore.
+		var best *lumavaultv1.ObjectMetadata
+		for _, candidate := range e.objects {
+			if candidate.Namespace == existing.Namespace && candidate.Sha256Digest == existing.Sha256Digest {
+				if best == nil || compareObjectsAsc(candidate, best) < 0 {
+					best = candidate
 				}
 			}
-			if best != nil {
-				e.dedupIndex[key] = best.Id
-			}
+		}
+		if best != nil {
+			e.dedupIndex[key] = best.Id
 		}
 	}
 
@@ -388,22 +306,6 @@ func (e *Engine) IsChunkReferenced(hash string) (bool, error) {
 func (e *Engine) hasObject(objectID string) bool {
 	_, ok := e.objects[objectID]
 	return ok
-}
-
-func (e *Engine) saveVersionsSnapshot() map[string]uint32 {
-	out := make(map[string]uint32, len(e.saveVersions))
-	for k, v := range e.saveVersions {
-		out[k] = v
-	}
-	return out
-}
-
-func (e *Engine) setSaveVersion(parentROMID string, version uint32) {
-	if version == 0 {
-		delete(e.saveVersions, parentROMID)
-	} else {
-		e.saveVersions[parentROMID] = version
-	}
 }
 
 func (e *Engine) putObjectDirect(obj *lumavaultv1.ObjectMetadata) {
@@ -444,25 +346,6 @@ func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 		return fmt.Errorf("%w: invalid or unspecified namespace %v", ErrInvalidArgument, req.Namespace)
 	}
 
-	switch dm := req.DomainMetadata.(type) {
-	case nil:
-		// Optional on CommitObject unless domain requires specific fields.
-	case *lumavaultv1.CommitObjectRequest_PhotoMetadata:
-		if req.Namespace != lumavaultv1.Namespace_NAMESPACE_PHOTOS || dm.PhotoMetadata == nil {
-			return fmt.Errorf("%w: photo_metadata is only valid for NAMESPACE_PHOTOS", ErrInvalidArgument)
-		}
-	case *lumavaultv1.CommitObjectRequest_CinemaMetadata:
-		if req.Namespace != lumavaultv1.Namespace_NAMESPACE_CINEMA || dm.CinemaMetadata == nil {
-			return fmt.Errorf("%w: cinema_metadata is only valid for NAMESPACE_CINEMA", ErrInvalidArgument)
-		}
-	case *lumavaultv1.CommitObjectRequest_GameMetadata:
-		if req.Namespace != lumavaultv1.Namespace_NAMESPACE_GAMES || dm.GameMetadata == nil {
-			return fmt.Errorf("%w: game_metadata is only valid for NAMESPACE_GAMES", ErrInvalidArgument)
-		}
-	default:
-		return fmt.Errorf("%w: unsupported domain_metadata type", ErrInvalidArgument)
-	}
-
 	if err := ValidateHash(req.Sha256Digest); err != nil {
 		return fmt.Errorf("sha256_digest: %w", err)
 	}
@@ -499,7 +382,7 @@ func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 	return nil
 }
 
-func applyFieldMaskPath(updated, existing, src *lumavaultv1.ObjectMetadata, path string) error {
+func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) error {
 	switch path {
 	case "filename":
 		updated.Filename = src.Filename
@@ -512,239 +395,10 @@ func applyFieldMaskPath(updated, existing, src *lumavaultv1.ObjectMetadata, path
 			}
 		}
 		updated.ThumbnailChunkHash = src.ThumbnailChunkHash
-
-	// PhotoMetadata paths
-	case "photo_metadata":
-		if updated.Namespace != lumavaultv1.Namespace_NAMESPACE_PHOTOS {
-			return fmt.Errorf("%w: path %q is only valid for NAMESPACE_PHOTOS", ErrInvalidArgument, path)
-		}
-		if src.GetPhotoMetadata() == nil {
-			updated.DomainMetadata = nil
-		} else {
-			updated.DomainMetadata = &lumavaultv1.ObjectMetadata_PhotoMetadata{
-				PhotoMetadata: proto.Clone(src.GetPhotoMetadata()).(*lumavaultv1.PhotoMetadata),
-			}
-		}
-	case "photo_metadata.live_photo_pair_id":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.LivePhotoPairId = src.GetPhotoMetadata().GetLivePhotoPairId()
-	case "photo_metadata.taken_at":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.TakenAt = cloneTimestamp(src.GetPhotoMetadata().GetTakenAt())
-	case "photo_metadata.latitude":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.Latitude = src.GetPhotoMetadata().GetLatitude()
-	case "photo_metadata.longitude":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.Longitude = src.GetPhotoMetadata().GetLongitude()
-	case "photo_metadata.width":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.Width = src.GetPhotoMetadata().GetWidth()
-	case "photo_metadata.height":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.Height = src.GetPhotoMetadata().GetHeight()
-	case "photo_metadata.camera_make":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.CameraMake = src.GetPhotoMetadata().GetCameraMake()
-	case "photo_metadata.camera_model":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.CameraModel = src.GetPhotoMetadata().GetCameraModel()
-	case "photo_metadata.album_ids":
-		pm, err := ensurePhotoMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		pm.AlbumIds = slices.Clone(src.GetPhotoMetadata().GetAlbumIds())
-
-	// CinemaMetadata paths
-	case "cinema_metadata":
-		if updated.Namespace != lumavaultv1.Namespace_NAMESPACE_CINEMA {
-			return fmt.Errorf("%w: path %q is only valid for NAMESPACE_CINEMA", ErrInvalidArgument, path)
-		}
-		if src.GetCinemaMetadata() == nil {
-			updated.DomainMetadata = nil
-		} else {
-			updated.DomainMetadata = &lumavaultv1.ObjectMetadata_CinemaMetadata{
-				CinemaMetadata: proto.Clone(src.GetCinemaMetadata()).(*lumavaultv1.CinemaMetadata),
-			}
-		}
-	case "cinema_metadata.playback_position_ms":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.PlaybackPositionMs = src.GetCinemaMetadata().GetPlaybackPositionMs()
-	case "cinema_metadata.duration_ms":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.DurationMs = src.GetCinemaMetadata().GetDurationMs()
-	case "cinema_metadata.tmdb_id":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.TmdbId = src.GetCinemaMetadata().GetTmdbId()
-	case "cinema_metadata.title":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.Title = src.GetCinemaMetadata().GetTitle()
-	case "cinema_metadata.overview":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.Overview = src.GetCinemaMetadata().GetOverview()
-	case "cinema_metadata.poster_url":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.PosterUrl = src.GetCinemaMetadata().GetPosterUrl()
-	case "cinema_metadata.backdrop_url":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.BackdropUrl = src.GetCinemaMetadata().GetBackdropUrl()
-	case "cinema_metadata.release_year":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.ReleaseYear = src.GetCinemaMetadata().GetReleaseYear()
-	case "cinema_metadata.season_number":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.SeasonNumber = src.GetCinemaMetadata().GetSeasonNumber()
-	case "cinema_metadata.episode_number":
-		cm, err := ensureCinemaMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		cm.EpisodeNumber = src.GetCinemaMetadata().GetEpisodeNumber()
-
-	// GameMetadata paths
-	case "game_metadata":
-		if updated.Namespace != lumavaultv1.Namespace_NAMESPACE_GAMES {
-			return fmt.Errorf("%w: path %q is only valid for NAMESPACE_GAMES", ErrInvalidArgument, path)
-		}
-		srcGM := src.GetGameMetadata()
-		existingGM := existing.GetGameMetadata()
-		if srcGM == nil && existingGM.GetParentRomObjectId() == "" {
-			updated.DomainMetadata = nil
-			return nil
-		}
-		if srcGM != nil {
-			if srcGM.ParentRomObjectId != "" && srcGM.ParentRomObjectId != existingGM.GetParentRomObjectId() {
-				return fmt.Errorf("%w: game_metadata.parent_rom_object_id is immutable", ErrInvalidArgument)
-			}
-			if srcGM.SaveVersion != 0 && srcGM.SaveVersion != existingGM.GetSaveVersion() {
-				return fmt.Errorf("%w: game_metadata.save_version is immutable", ErrInvalidArgument)
-			}
-		}
-		gm, err := ensureGameMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		gm.Console = srcGM.GetConsole()
-		gm.IgdbId = srcGM.GetIgdbId()
-		gm.BoxArtUrl = srcGM.GetBoxArtUrl()
-		gm.SaveKind = srcGM.GetSaveKind()
-	case "game_metadata.console":
-		gm, err := ensureGameMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		gm.Console = src.GetGameMetadata().GetConsole()
-	case "game_metadata.igdb_id":
-		gm, err := ensureGameMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		gm.IgdbId = src.GetGameMetadata().GetIgdbId()
-	case "game_metadata.box_art_url":
-		gm, err := ensureGameMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		gm.BoxArtUrl = src.GetGameMetadata().GetBoxArtUrl()
-	case "game_metadata.save_kind":
-		gm, err := ensureGameMetadata(updated, path)
-		if err != nil {
-			return err
-		}
-		gm.SaveKind = src.GetGameMetadata().GetSaveKind()
-
 	default:
 		return fmt.Errorf("%w: unsupported or immutable update_mask path %q", ErrInvalidArgument, path)
 	}
 	return nil
-}
-
-func ensurePhotoMetadata(obj *lumavaultv1.ObjectMetadata, path string) (*lumavaultv1.PhotoMetadata, error) {
-	if obj.Namespace != lumavaultv1.Namespace_NAMESPACE_PHOTOS {
-		return nil, fmt.Errorf("%w: path %q is only valid for NAMESPACE_PHOTOS", ErrInvalidArgument, path)
-	}
-	if obj.GetPhotoMetadata() == nil {
-		obj.DomainMetadata = &lumavaultv1.ObjectMetadata_PhotoMetadata{
-			PhotoMetadata: &lumavaultv1.PhotoMetadata{},
-		}
-	}
-	return obj.GetPhotoMetadata(), nil
-}
-
-func ensureCinemaMetadata(obj *lumavaultv1.ObjectMetadata, path string) (*lumavaultv1.CinemaMetadata, error) {
-	if obj.Namespace != lumavaultv1.Namespace_NAMESPACE_CINEMA {
-		return nil, fmt.Errorf("%w: path %q is only valid for NAMESPACE_CINEMA", ErrInvalidArgument, path)
-	}
-	if obj.GetCinemaMetadata() == nil {
-		obj.DomainMetadata = &lumavaultv1.ObjectMetadata_CinemaMetadata{
-			CinemaMetadata: &lumavaultv1.CinemaMetadata{},
-		}
-	}
-	return obj.GetCinemaMetadata(), nil
-}
-
-func ensureGameMetadata(obj *lumavaultv1.ObjectMetadata, path string) (*lumavaultv1.GameMetadata, error) {
-	if obj.Namespace != lumavaultv1.Namespace_NAMESPACE_GAMES {
-		return nil, fmt.Errorf("%w: path %q is only valid for NAMESPACE_GAMES", ErrInvalidArgument, path)
-	}
-	if obj.GetGameMetadata() == nil {
-		obj.DomainMetadata = &lumavaultv1.ObjectMetadata_GameMetadata{
-			GameMetadata: &lumavaultv1.GameMetadata{},
-		}
-	}
-	return obj.GetGameMetadata(), nil
 }
 
 func isValidNamespace(ns lumavaultv1.Namespace) bool {
@@ -753,17 +407,6 @@ func isValidNamespace(ns lumavaultv1.Namespace) bool {
 		lumavaultv1.Namespace_NAMESPACE_CINEMA,
 		lumavaultv1.Namespace_NAMESPACE_GAMES:
 		return true
-	default:
-		return false
-	}
-}
-
-func isDeduplicatable(ns lumavaultv1.Namespace, gm *lumavaultv1.GameMetadata) bool {
-	switch ns {
-	case lumavaultv1.Namespace_NAMESPACE_PHOTOS:
-		return true
-	case lumavaultv1.Namespace_NAMESPACE_GAMES:
-		return gm.GetParentRomObjectId() == ""
 	default:
 		return false
 	}
@@ -794,25 +437,14 @@ func compareObjectsAsc(a, b *lumavaultv1.ObjectMetadata) int {
 	return 0
 }
 
-func compareObjectsDesc(a, b *lumavaultv1.ObjectMetadata, sortBySaveVersion bool) int {
-	if sortBySaveVersion {
-		va := a.GetGameMetadata().GetSaveVersion()
-		vb := b.GetGameMetadata().GetSaveVersion()
-		if va != vb {
-			if va > vb {
-				return -1
-			}
-			return 1
+func compareObjectsDesc(a, b *lumavaultv1.ObjectMetadata) int {
+	ta := a.GetCreatedAt().AsTime().UnixNano()
+	tb := b.GetCreatedAt().AsTime().UnixNano()
+	if ta != tb {
+		if ta > tb {
+			return -1
 		}
-	} else {
-		ta := a.GetCreatedAt().AsTime().UnixNano()
-		tb := b.GetCreatedAt().AsTime().UnixNano()
-		if ta != tb {
-			if ta > tb {
-				return -1
-			}
-			return 1
-		}
+		return 1
 	}
 	if a.Id < b.Id {
 		return -1
@@ -823,14 +455,7 @@ func compareObjectsDesc(a, b *lumavaultv1.ObjectMetadata, sortBySaveVersion bool
 	return 0
 }
 
-func isAfterCursor(obj *lumavaultv1.ObjectMetadata, c *pageCursor, sortBySaveVersion bool) bool {
-	if sortBySaveVersion {
-		v := obj.GetGameMetadata().GetSaveVersion()
-		if v != c.SaveVersion {
-			return v < c.SaveVersion
-		}
-		return obj.Id > c.ID
-	}
+func isAfterCursor(obj *lumavaultv1.ObjectMetadata, c *pageCursor) bool {
 	t := obj.GetCreatedAt().AsTime().UnixNano()
 	if t != c.CreatedAtNanos {
 		return t < c.CreatedAtNanos
@@ -838,21 +463,16 @@ func isAfterCursor(obj *lumavaultv1.ObjectMetadata, c *pageCursor, sortBySaveVer
 	return obj.Id > c.ID
 }
 
-func encodePageToken(obj *lumavaultv1.ObjectMetadata, sortBySaveVersion bool) string {
+func encodePageToken(obj *lumavaultv1.ObjectMetadata) string {
 	c := pageCursor{
-		BySaveVersion: sortBySaveVersion,
-		ID:            obj.Id,
-	}
-	if sortBySaveVersion {
-		c.SaveVersion = obj.GetGameMetadata().GetSaveVersion()
-	} else {
-		c.CreatedAtNanos = obj.GetCreatedAt().AsTime().UnixNano()
+		CreatedAtNanos: obj.GetCreatedAt().AsTime().UnixNano(),
+		ID:             obj.Id,
 	}
 	b, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func decodePageToken(token string, sortBySaveVersion bool) (*pageCursor, error) {
+func decodePageToken(token string) (*pageCursor, error) {
 	b, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid page_token encoding: %v", ErrInvalidArgument, err)
@@ -860,9 +480,6 @@ func decodePageToken(token string, sortBySaveVersion bool) (*pageCursor, error) 
 	var c pageCursor
 	if err := json.Unmarshal(b, &c); err != nil || c.ID == "" {
 		return nil, fmt.Errorf("%w: malformed page_token payload", ErrInvalidArgument)
-	}
-	if c.BySaveVersion != sortBySaveVersion {
-		return nil, fmt.Errorf("%w: page_token sort mode does not match query", ErrInvalidArgument)
 	}
 	return &c, nil
 }

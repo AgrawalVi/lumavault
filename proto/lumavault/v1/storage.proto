@@ -15,16 +15,14 @@ enum Namespace {
   NAMESPACE_GAMES = 3;
 }
 
-// SaveKind distinguishes battery-backed SRAM saves (.sav) from emulator save states (.svs).
-enum SaveKind {
-  SAVE_KIND_UNSPECIFIED = 0;
-  SAVE_KIND_BATTERY_SAV = 1;
-  SAVE_KIND_STATE_SVS = 2;
-}
-
-// ObjectMetadata represents the control-plane manifest and domain metadata for an immutable
-// content-addressed object stored in LumaVault. Raw chunk bytes never enter Protobuf messages;
-// they are transferred via the HTTP Data Plane (PUT/GET /v1/chunks/{sha256} and GET /v1/stream/{id}).
+// ObjectMetadata represents the control-plane manifest for an immutable content-addressed
+// object stored in LumaVault.
+//
+// LumaVault Core is a pure object and chunk storage engine: raw chunk bytes never enter
+// Protobuf messages (they flow over the HTTP Data Plane via PUT/GET /v1/chunks/{sha256}
+// and GET /v1/stream/{id}), and application-layer domain metadata (photo albums/EXIF/Live Photo
+// pairing, TMDB catalog & playback state, IGDB catalog & game save version lineage) lives in
+// the shared PostgreSQL application database referencing ObjectMetadata.id.
 message ObjectMetadata {
   string id = 1;
   Namespace namespace = 2;
@@ -42,53 +40,6 @@ message ObjectMetadata {
   string thumbnail_chunk_hash = 9;
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp updated_at = 11;
-
-  oneof domain_metadata {
-    PhotoMetadata photo_metadata = 12;
-    CinemaMetadata cinema_metadata = 13;
-    GameMetadata game_metadata = 14;
-  }
-}
-
-// PhotoMetadata stores EXIF, geolocation, album membership, and Apple Live Photo pairing.
-message PhotoMetadata {
-  // Links the still image (.heic/.jpg) and companion motion clip (.mov) of a Live Photo.
-  string live_photo_pair_id = 1;
-  google.protobuf.Timestamp taken_at = 2;
-  double latitude = 3;
-  double longitude = 4;
-  uint32 width = 5;
-  uint32 height = 6;
-  string camera_make = 7;
-  string camera_model = 8;
-  repeated string album_ids = 9;
-}
-
-// CinemaMetadata stores TMDB catalog enrichment and cross-device playback state.
-message CinemaMetadata {
-  uint64 playback_position_ms = 1;
-  uint64 duration_ms = 2;
-  int64 tmdb_id = 3;
-  string title = 4;
-  string overview = 5;
-  string poster_url = 6;
-  string backdrop_url = 7;
-  uint32 release_year = 8;
-  uint32 season_number = 9;
-  uint32 episode_number = 10;
-}
-
-// GameMetadata stores console system identifiers, IGDB metadata, and versioned save lineage.
-message GameMetadata {
-  // Target system identifier (e.g., "GBA", "NDS", "N64", "SNES", "GBC", "NES").
-  string console = 1;
-  int64 igdb_id = 2;
-  string box_art_url = 3;
-  // Empty when this object is a ROM; set to the parent ROM's object_id for save files.
-  string parent_rom_object_id = 4;
-  // Monotonically increasing version number (1, 2, 3...) assigned atomically on CommitObject for saves.
-  uint32 save_version = 5;
-  SaveKind save_kind = 6;
 }
 
 // StorageService is the client-facing Control Plane RPC service for LumaVault.
@@ -97,20 +48,26 @@ message GameMetadata {
 service StorageService {
   // Checks which of the candidate SHA-256 chunk hashes are not yet present in ChunkStore
   // so clients only upload missing chunks via PUT /v1/chunks/{sha256}.
-  rpc HasChunks(HasChunksRequest) returns (HasChunksResponse);
+  rpc HasChunks(HasChunksRequest) returns (HasChunksResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
   // Commits an object manifest after all referenced chunks have been uploaded to ChunkStore.
-  // Idempotent on (namespace, sha256_digest) for photos and ROMs (parent_rom_object_id == "").
-  // Atomically assigns the next monotonic save_version when game_metadata.parent_rom_object_id is set.
+  // Idempotent on (namespace, sha256_digest) unless skip_dedup is true.
   rpc CommitObject(CommitObjectRequest) returns (CommitObjectResponse);
 
   // Retrieves a single object's metadata and chunk manifest by ID.
-  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
-  // Lists objects within a namespace with optional domain filters and cursor pagination.
-  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+  // Lists objects within a namespace with deterministic cursor pagination.
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
-  // Partially updates mutable object metadata fields using a FieldMask.
+  // Partially updates mutable storage-level metadata fields (filename, mime_type,
+  // thumbnail_chunk_hash) using a FieldMask.
   rpc UpdateObjectMetadata(UpdateObjectMetadataRequest) returns (UpdateObjectMetadataResponse);
 
   // Deletes an object's metadata record from MetadataStore.
@@ -134,12 +91,9 @@ message CommitObjectRequest {
   string sha256_digest = 6;
   repeated string chunk_hashes = 7;
   string thumbnail_chunk_hash = 8;
-
-  oneof domain_metadata {
-    PhotoMetadata photo_metadata = 9;
-    CinemaMetadata cinema_metadata = 10;
-    GameMetadata game_metadata = 11;
-  }
+  // When true, always creates a new ObjectMetadata record with a distinct ID even if another
+  // object in the same namespace shares sha256_digest (e.g., for versioned game save snapshots).
+  bool skip_dedup = 9;
 }
 
 message CommitObjectResponse {
@@ -159,11 +113,8 @@ message GetObjectResponse {
 
 message ListObjectsRequest {
   Namespace namespace = 1;
-  string album_id = 2;
-  string parent_rom_object_id = 3;
-  string console = 4;
-  int32 page_size = 5;
-  string page_token = 6;
+  int32 page_size = 2;
+  string page_token = 3;
 }
 
 message ListObjectsResponse {
