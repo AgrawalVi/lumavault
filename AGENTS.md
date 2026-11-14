@@ -28,5 +28,13 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 ## 3. Standard Commands
 
 - `make proto` — Run `buf lint` and `buf generate` (Go, Swift, and TypeScript/Connect-ES stubs).
+- `make lint` — Run `buf lint`, `go vet ./...`, and SDK static checks.
 - `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK tests.
 - `make build` — Compile `cmd/lumavault`.
+
+## 4. Branch, Pull Request & Linear Linking Workflow
+
+Never commit or push directly to `main`. Every change follows this lifecycle:
+1. **Branch Off `origin/main`:** Fetch `origin` (`git fetch origin`) and create a branch named with the Linear issue's `gitBranchName` (e.g., `zvishrut/lum-XX-...` or `<type>/<slug>` for non-issue chores, inside an isolated `git worktree` when working in parallel). Keep `git config core.hooksPath .githooks` enabled so direct commits and pushes to `main` are blocked locally.
+2. **Verify Locally:** Run `make lint` and `make test` before pushing.
+3. **Open a PR & Link Linear:** Push the branch (`git push -u origin HEAD`), open a GitHub Pull Request via `gh pr create` referencing `LUM-XX` in the title/body, and attach the PR URL to the Linear issue via `save_issue(id, links: [{url, title}])` while keeping the issue `In Progress` until the PR is merged. **Never push directly to `main` or self-merge PRs**—leave every PR open for user review and passing CI checks.

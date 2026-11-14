@@ -1,0 +1,8 @@
+#!/bin/sh
+# shortcut: local hook because GitHub Free blocks remote branch rulesets on private repos; replace with GitHub ruleset if upgraded to Pro or made public
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "error: direct pushes to main are blocked; push a branch and open a PR (gh pr create)." >&2
+    exit 1
+  fi
+done
