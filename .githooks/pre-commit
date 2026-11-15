@@ -1,0 +1,6 @@
+#!/bin/sh
+# shortcut: local hook because GitHub Free blocks remote branch rulesets on private repos; replace with GitHub ruleset if upgraded to Pro or made public
+if [ "$(git symbolic-ref --quiet HEAD)" = "refs/heads/main" ]; then
+  echo "error: direct commits to main are blocked; create a branch first (git switch -c <branch>)." >&2
+  exit 1
+fi
