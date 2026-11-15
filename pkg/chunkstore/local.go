@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+const (
+	chunksSubdir = "chunks"
+	tmpSubdir    = "tmp"
+)
+
 // LocalChunkStore implements ChunkStore backed by a sharded local filesystem directory.
 type LocalChunkStore struct {
 	mu        sync.RWMutex
@@ -29,8 +34,8 @@ func NewLocalChunkStore(rootDir string) (*LocalChunkStore, error) {
 	if rootDir == "" {
 		return nil, errors.New("chunkstore: rootDir must not be empty")
 	}
-	chunksDir := filepath.Join(rootDir, "chunks")
-	tmpDir := filepath.Join(rootDir, "tmp")
+	chunksDir := filepath.Join(rootDir, chunksSubdir)
+	tmpDir := filepath.Join(rootDir, tmpSubdir)
 
 	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
 		return nil, fmt.Errorf("chunkstore: create chunks dir: %w", err)
@@ -45,6 +50,8 @@ func NewLocalChunkStore(rootDir string) (*LocalChunkStore, error) {
 	}, nil
 }
 
+// chunkPath shards chunks into two-level hex-prefix subdirectories (<chunks>/ab/cd/<hash>)
+// so no single directory accumulates too many files.
 func (s *LocalChunkStore) chunkPath(hash string) string {
 	return filepath.Join(s.chunksDir, hash[0:2], hash[2:4], hash)
 }
@@ -109,6 +116,7 @@ func (s *LocalChunkStore) PutChunk(ctx context.Context, hash string, r io.Reader
 		return 0, ErrHashMismatch
 	}
 
+	// os.CreateTemp creates files with 0600 (owner-only); widen to 0644 (rw-r--r--) before publishing.
 	if err := tmpFile.Chmod(0o644); err != nil {
 		return 0, fmt.Errorf("chunkstore: chmod temp file: %w", err)
 	}
@@ -120,6 +128,7 @@ func (s *LocalChunkStore) PutChunk(ctx context.Context, hash string, r io.Reader
 	}
 
 	destPath := s.chunkPath(hash)
+	// Create the <ab>/<cd> shard directories if missing (mkdir -p with rwxr-xr-x).
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return 0, fmt.Errorf("chunkstore: create shard dir: %w", err)
 	}

@@ -11,7 +11,7 @@ const (
 	// MaxChunkSizeBytes is the maximum allowed size (64 MiB) for a single content-addressed chunk.
 	MaxChunkSizeBytes int64 = 64 << 20
 	// StreamBufferSize is the buffer size (32 KiB) used when streaming chunk uploads to disk.
-	StreamBufferSize int = 32 * 1024
+	StreamBufferSize int = 32 << 10
 	// sha256HexLen is the exact length of a lowercase hex-encoded SHA-256 digest.
 	sha256HexLen int = 64
 )
