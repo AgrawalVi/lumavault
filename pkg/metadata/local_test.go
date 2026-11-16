@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	lumavaultv1 "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1"
-	"github.com/AgrawalVi/lumavault/pkg/constants"
+	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
+	"github.com/lumavault/lumavault/pkg/constants"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"

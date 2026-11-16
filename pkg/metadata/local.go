@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	lumavaultv1 "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1"
+	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
 	"google.golang.org/protobuf/proto"
 )
 

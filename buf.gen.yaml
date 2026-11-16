@@ -3,7 +3,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/AgrawalVi/lumavault/gen/go
+      value: github.com/lumavault/lumavault/gen/go
 plugins:
   # Go Protobuf & Connect-RPC server/client stubs
   - remote: buf.build/protocolbuffers/go

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AgrawalVi/lumavault/pkg/constants"
+	"github.com/lumavault/lumavault/pkg/constants"
 )
 
 func sha256Hex(data []byte) string {

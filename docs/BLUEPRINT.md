@@ -163,7 +163,7 @@ lumavault/
 ├── docker-compose.yml                # Shared PostgreSQL instance for Photos, Cinema & Arcade app schemas
 ├── buf.yaml                          # Protobuf module & linter configuration
 ├── buf.gen.yaml                      # Generates Go (gen/go), Swift (sdk/swift), Web (sdk/web)
-├── go.mod                            # Go module: github.com/AgrawalVi/lumavault
+├── go.mod                            # Go module: github.com/lumavault/lumavault
 ├── Package.swift                     # Swift Package for iOS, iPadOS, tvOS, macOS
 ├── docs/
 │   └── BLUEPRINT.md                  # Product & Architecture Blueprint
