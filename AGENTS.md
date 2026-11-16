@@ -30,7 +30,7 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
 | Execution Order & Project | Linear ID | Owned Paths |
 | :--- | :--- | :--- |
 | **`1. Core Backend, Contracts & Basic Data Layer`** | `P-LUM-1` | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `docker-compose.yml`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/constants/`, `pkg/validate/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
-| **`2. Client SDKs (Web/TypeScript & Swift)`** | `P-LUM-2` | `sdk/web/`, `sdk/swift/`, `Package.swift`, `Makefile` (SDK test targets) |
+| **`2. Client SDKs (Web/TypeScript & Swift)`** | `P-LUM-2` | `sdk/web/`, `sdk/swift/`, `sdk/testdata/`, `Package.swift`, `Makefile` (SDK test targets) |
 | **`3. App Platform, Auth & Multi-Tenant RBAC`** | `P-LUM-7` | `pnpm-workspace.yaml`, `proto/lumavault/iam/v1/iam.proto`, `packages/ui/`, `apps/portal/`, `apps/api/` *(excluding per-app `schemas/{photos,cinema,arcade}.ts`, `routers/{photos,cinema,arcade}.ts`, and `workers/photos*.ts`)* |
 | **`4. LumaVault Photos`** | `P-LUM-3` | `proto/lumavault/photos/v1/photos.proto`, `apps/api/src/db/schemas/photos.ts`, `apps/api/src/routers/photos.ts`, `apps/api/src/workers/photos*.ts`, `apps/photos/` |
 | **`5. LumaVault Cinema`** | `P-LUM-4` | `proto/lumavault/cinema/v1/cinema.proto`, `apps/api/src/db/schemas/cinema.ts`, `apps/api/src/routers/cinema.ts`, `apps/cinema/` |
