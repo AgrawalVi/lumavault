@@ -15,7 +15,7 @@ LumaVault separates **pure distributed object/chunk storage** (modeled after **G
 | **Internal Node-to-Node API** | **gRPC + Protocol Buffers (`proto3`)** | Strictly-typed, low-overhead binary RPCs for Paxos voting (`Prepare`/`Promise`/`Accept`/`Accepted`) and inter-node chunk replication. |
 | **Client-Facing Storage Gateway** | **Connect-RPC (`connectrpc/go`) + HTTP Data Plane (`PUT/GET /v1/chunks/{sha256}` & `HTTP 206`)** | Single `connectrpc/go` handler serving Connect, gRPC, and gRPC-Web for the Storage Control Plane (`HasChunks`, `CommitObject`, `GetObject`, `ListObjects`, `UpdateObjectMetadata`, `DeleteObject` — keeping all Protobuf messages `< 100 KB`); raw streaming HTTP for Data Plane chunk transfers (`PUT/GET /v1/chunks/{sha256}`) and `Range: bytes=start-end` streaming (`GET /v1/stream/{id}`) for native `AVPlayer` and `<video>` 4K scrubbing. |
 | **Application Database Layer** | **PostgreSQL (`docker-compose.yml`) + App API Services** | Shared PostgreSQL server at the monorepo root with per-application schemas/tables (`photos`, `cinema`, `arcade`) storing rich relational domain data and high-frequency user state (Albums, EXIF, Live Photo pairing; TMDB catalog, seasons/episodes, and `playback_position_ms`; IGDB metadata, consoles, and monotonic game save version lineage `v1, v2, v3...`), referencing LumaVault `object_id` for immutable blob storage and streaming. |
-| **Client SDKs & Ecosystem** | **Web/TypeScript (`sdk/web`)** + **Swift/SwiftUI (`sdk/swift`)** | `@lumavault/sdk` (Connect-ES + Web Crypto SHA-256 chunking) for Web/Node and `LumaVaultSDK` Swift Package (`Connect-Swift` + `CryptoKit` + `URLSession` background chunk transfer) for `iOS`, `iPadOS`, `tvOS`, and `macOS`. |
+| **Client SDKs & Ecosystem** | **Web/TypeScript (`sdk/web`)** + **Swift/SwiftUI (`sdk/swift`)** | `@lumavault/sdk` for Web/Node and `LumaVaultSDK` Swift Package for `iOS`, `iPadOS`, `tvOS`, and `macOS`. Internal design pending redesign. |
 
 ```mermaid
 flowchart TD
@@ -101,14 +101,7 @@ flowchart TD
 
 ## 3. Client SDKs: Web (`sdk/web`) & Swift (`sdk/swift`)
 
-Both SDKs are generated from `proto/lumavault/v1/storage.proto` via **Buf** and wrap the raw Storage Core RPCs and HTTP Data Plane endpoints with ergonomic helpers:
-1. **Web / TypeScript SDK (`sdk/web/` — `@lumavault/sdk`):**
-   * Uses **Connect-ES (`@connectrpc/connect-web`)** to talk directly to the Go Gateway over standard HTTP/1.1 or HTTP/2 without requiring an Envoy proxy.
-   * Uses the browser/Node **Web Crypto API (`crypto.subtle.digest('SHA-256', ...)`** to slice files, check existing chunks (`HasChunks`), upload missing chunks (`PUT /v1/chunks/{sha256}`), and commit objects (`CommitObject`) returning the committed `ObjectMetadata` (whose `id` is then recorded in the app's PostgreSQL database).
-   * Provides URL helpers for `<video>` / `<audio>` `HTTP 206` range streaming.
-2. **Swift SDK (`sdk/swift/` — `LumaVaultSDK`):**
-   * Native Swift Package (`async`/`await`) supporting `iOS`, `iPadOS`, `tvOS`, and `macOS` using **Connect-Swift (`connectrpc/swift`)** for Control Plane RPCs and `URLSession` (`uploadTask` / `dataTask`) for streaming `4MB–64MB` chunks in the background.
-   * Uses Apple `CryptoKit` (`SHA256`) for background chunk slicing and deduplicated uploads, plus `AVPlayer` stream URL helpers.
+SDK design is being redone from scratch. Only the package scaffolding (`sdk/web/package.json`, `sdk/web/tsconfig.json`, `Package.swift`, and the Buf codegen targets) exists today. The SDK architecture will be specified here once the new design is approved.
 
 ---
 
@@ -145,8 +138,7 @@ Work is organized in Linear under team **Lumavault (`LUM`)** across 6 Projects d
    * `M2`: Basic Data Layer (`LocalChunkStore` & `LocalMetadataStore` + deterministic `Engine`)
    * `M3`: Client Gateway (Connect-RPC Control Plane + HTTP Data Plane + Shared `docker-compose.yml` PostgreSQL setup)
 2. **`P-LUM-2` — 2. Client SDKs (Web/TypeScript & Swift)**
-   * `M1`: Web / TypeScript SDK (`sdk/web`)
-   * `M2`: Swift SDK (`sdk/swift`)
+   * Milestones to be re-scoped after the SDK redesign.
 3. **`P-LUM-3` — 3. LumaVault Photos**
    * `M1`: Photos PostgreSQL Schema, Timeline Grid, Thumbnails & Deduplicated Upload
    * `M2`: Live Photos, Albums, Trash Lifecycle & EXIF/Map View
