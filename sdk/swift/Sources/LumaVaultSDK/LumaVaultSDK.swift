@@ -1,4 +1,6 @@
+@_exported import Connect
 import Foundation
+@_exported import SwiftProtobuf
 
 /// Namespace and version metadata for the LumaVault Swift SDK.
 public enum LumaVaultSDK {

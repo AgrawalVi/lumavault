@@ -32,7 +32,8 @@ build: $(PROTO_STAMPS) sdk/web/node_modules
 test: $(PROTO_STAMPS) sdk/web/node_modules
 	go test -race ./...
 	npm --prefix sdk/web run typecheck
-	swift build
+	npm --prefix sdk/web run --if-present test
+	swift test
 
 lint: $(PROTO_STAMPS) sdk/web/node_modules
 	$(BUF) lint
