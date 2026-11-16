@@ -16,7 +16,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "node -e \"fs.rmSync('.build/test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --enable-source-maps --test .build/test"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0",
@@ -24,6 +25,7 @@
     "@connectrpc/connect-web": "^2.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   }
 }
