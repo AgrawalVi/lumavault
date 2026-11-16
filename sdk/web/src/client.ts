@@ -104,7 +104,12 @@ export interface UpdateObjectMetadataFields {
   thumbnailChunkHash?: string;
 }
 
-export interface DownloadObjectOptions extends Omit<DownloadStreamOptions, "fetch"> {
+export interface DownloadObjectOptions {
+  /** Expected whole-object SHA-256 digest; falls back to quote-stripped strong `ETag` if omitted. */
+  expectedSha256?: string;
+  /** Maximum bytes buffered in memory before aborting with `PAYLOAD_TOO_LARGE` (default: 256 MiB). */
+  maxBytes?: number;
+  signal?: AbortSignal;
   headers?: HeadersInit;
 }
 

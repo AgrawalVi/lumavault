@@ -2,22 +2,21 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 
+import { create } from "@bufbuild/protobuf";
+import { timestampDate, timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { createRouterTransport } from "@connectrpc/connect";
 
+import { EMPTY_SHA256_DIGEST } from "./constants.js";
 import {
   Code,
   ConnectError,
-  EMPTY_SHA256_DIGEST,
   LumaVaultClient,
   LumaVaultDataPlaneError,
   MIN_CHUNK_SIZE_BYTES,
   Namespace,
   ObjectMetadataSchema,
   StorageService,
-  create,
   getThumbnailUrl,
-  timestampDate,
-  timestampFromMs,
   type CommitObjectRequest,
   type ObjectMetadata,
   type UploadPhase,
