@@ -25,7 +25,18 @@ let package = Package(
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "Connect", package: "connect-swift"),
             ],
-            path: "sdk/swift/Sources/LumaVaultSDK"
+            path: "sdk/swift/Sources/LumaVaultSDK",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+            ]
+        ),
+        .testTarget(
+            name: "LumaVaultSDKTests",
+            dependencies: ["LumaVaultSDK"],
+            path: "sdk/swift/Tests/LumaVaultSDKTests",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+            ]
         ),
     ]
 )
