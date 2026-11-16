@@ -20,11 +20,10 @@ func (br byteRange) length() int64 { return br.end - br.start + 1 }
 // It supports "start-end", "start-", and "-suffix", clamps end and oversized suffixes to
 // the object, and rejects other units, multiple ranges, empty objects, and malformed input.
 func parseRange(header string, size int64) (byteRange, error) {
-	const prefix = "bytes="
-	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+	if len(header) < len(rangeSpecPrefix) || !strings.EqualFold(header[:len(rangeSpecPrefix)], rangeSpecPrefix) {
 		return byteRange{}, errRangeNotSatisfiable
 	}
-	spec := strings.TrimSpace(header[len(prefix):])
+	spec := strings.TrimSpace(header[len(rangeSpecPrefix):])
 	if spec == "" || strings.Contains(spec, ",") || size <= 0 {
 		return byteRange{}, errRangeNotSatisfiable
 	}

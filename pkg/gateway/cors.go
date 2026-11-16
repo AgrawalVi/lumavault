@@ -7,11 +7,11 @@ import "net/http"
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Access-Control-Allow-Origin", corsAllowOrigin)
-		h.Set("Access-Control-Expose-Headers", corsExposeHeaders)
+		h.Set(headerCORSAllowOrigin, corsAllowOrigin)
+		h.Set(headerCORSExposeHeaders, corsExposeHeaders)
 		if r.Method == http.MethodOptions {
-			h.Set("Access-Control-Allow-Methods", corsAllowMethods)
-			h.Set("Access-Control-Allow-Headers", corsAllowHeaders)
+			h.Set(headerCORSAllowMethods, corsAllowMethods)
+			h.Set(headerCORSAllowHeaders, corsAllowHeaders)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

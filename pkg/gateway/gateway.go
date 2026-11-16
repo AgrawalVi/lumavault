@@ -33,10 +33,10 @@ func NewHandler(meta metadata.MetadataStore, chunks chunkstore.ChunkStore) http.
 	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(controlPlaneReadMaxBytes))
 
 	// GET patterns also match HEAD requests.
-	mux.HandleFunc("PUT /v1/chunks/{sha256}", gw.putChunk)
-	mux.HandleFunc("GET /v1/chunks/{sha256}", gw.getChunk)
-	mux.HandleFunc("GET /v1/stream/{object_id}", gw.stream)
-	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc(routePutChunk, gw.putChunk)
+	mux.HandleFunc(routeGetChunk, gw.getChunk)
+	mux.HandleFunc(routeStream, gw.stream)
+	mux.HandleFunc(routeHealthz, healthz)
 
 	return withCORS(mux)
 }

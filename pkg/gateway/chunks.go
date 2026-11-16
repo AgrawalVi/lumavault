@@ -18,7 +18,7 @@ type putChunkResponse struct {
 
 // putChunk streams the request body straight into ChunkStore, which verifies the SHA-256.
 func (g *gateway) putChunk(w http.ResponseWriter, r *http.Request) {
-	hash := r.PathValue("sha256")
+	hash := r.PathValue(paramSHA256)
 	if err := validate.Hash(hash); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -48,7 +48,7 @@ func (g *gateway) putChunk(w http.ResponseWriter, r *http.Request) {
 
 // getChunk serves a whole chunk for GET and HEAD with immutable caching headers.
 func (g *gateway) getChunk(w http.ResponseWriter, r *http.Request) {
-	hash := r.PathValue("sha256")
+	hash := r.PathValue(paramSHA256)
 	if err := validate.Hash(hash); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -67,14 +67,14 @@ func (g *gateway) getChunk(w http.ResponseWriter, r *http.Request) {
 
 	etag := quoteETag(hash)
 	h := w.Header()
-	h.Set("ETag", etag)
-	h.Set("Cache-Control", chunkCacheControl)
-	if etagMatchesAny(r.Header.Get("If-None-Match"), etag) {
+	h.Set(headerETag, etag)
+	h.Set(headerCacheControl, chunkCacheControl)
+	if etagMatchesAny(r.Header.Get(headerIfNoneMatch), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	h.Set("Content-Type", contentTypeOctetStream)
-	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	h.Set(headerContentType, contentTypeOctetStream)
+	h.Set(headerContentLength, strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return

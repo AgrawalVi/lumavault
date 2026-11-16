@@ -46,7 +46,7 @@ func toConnectError(ctx context.Context, err error) error {
 
 // writeJSON writes v as a JSON body with the given status.
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", contentTypeJSON)
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

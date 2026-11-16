@@ -15,7 +15,7 @@ import (
 // stream serves GET and HEAD /v1/stream/{object_id} as one byte sequence across the
 // object's chunks, with single-range 206 support for video players.
 func (g *gateway) stream(w http.ResponseWriter, r *http.Request) {
-	obj, err := g.meta.GetObject(r.Context(), r.PathValue("object_id"))
+	obj, err := g.meta.GetObject(r.Context(), r.PathValue(paramObjectID))
 	if err != nil {
 		switch {
 		case errors.Is(err, metadata.ErrObjectNotFound):
@@ -31,9 +31,9 @@ func (g *gateway) stream(w http.ResponseWriter, r *http.Request) {
 	size := int64(obj.GetSizeBytes())
 	etag := quoteETag(obj.GetSha256Digest())
 	h := w.Header()
-	h.Set("Accept-Ranges", "bytes")
-	h.Set("ETag", etag)
-	if etagMatchesAny(r.Header.Get("If-None-Match"), etag) {
+	h.Set(headerAcceptRanges, rangeUnitBytes)
+	h.Set(headerETag, etag)
+	if etagMatchesAny(r.Header.Get(headerIfNoneMatch), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -41,15 +41,15 @@ func (g *gateway) stream(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = contentTypeOctetStream
 	}
-	h.Set("Content-Type", contentType)
+	h.Set(headerContentType, contentType)
 
 	status := http.StatusOK
 	br := byteRange{start: 0, end: size - 1}
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && ifRangeAllowsRange(r.Header.Get("If-Range"), etag) {
+	if rangeHeader := r.Header.Get(headerRange); rangeHeader != "" && ifRangeAllowsRange(r.Header.Get(headerIfRange), etag) {
 		br, err = parseRange(rangeHeader, size)
 		if err != nil {
-			h.Del("Content-Type")
-			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			h.Del(headerContentType)
+			h.Set(headerContentRange, fmt.Sprintf(contentRangeNone, size))
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
@@ -59,9 +59,9 @@ func (g *gateway) stream(w http.ResponseWriter, r *http.Request) {
 	// Content headers are set only once the response is known to succeed, so error
 	// bodies never carry a stale Content-Length or Content-Range.
 	setContentHeaders := func() {
-		h.Set("Content-Length", strconv.FormatInt(max(br.length(), 0), 10))
+		h.Set(headerContentLength, strconv.FormatInt(max(br.length(), 0), 10))
 		if status == http.StatusPartialContent {
-			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", br.start, br.end, size))
+			h.Set(headerContentRange, fmt.Sprintf(contentRangeFull, br.start, br.end, size))
 		}
 	}
 	if size == 0 || r.Method == http.MethodHead {

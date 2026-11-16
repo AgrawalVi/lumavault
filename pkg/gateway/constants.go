@@ -18,3 +18,39 @@ const (
 	corsExposeHeaders = "Content-Range, Accept-Ranges, Content-Length, ETag, " +
 		"Connect-Content-Encoding, Grpc-Status, Grpc-Message"
 )
+
+// Routes and the path parameters their handlers read. Keep each pair in sync.
+const (
+	routePutChunk = "PUT /v1/chunks/{sha256}"
+	routeGetChunk = "GET /v1/chunks/{sha256}"
+	routeStream   = "GET /v1/stream/{object_id}"
+	routeHealthz  = "GET /healthz"
+
+	paramSHA256   = "sha256"
+	paramObjectID = "object_id"
+)
+
+// HTTP header names used by the data plane and CORS middleware.
+const (
+	headerAcceptRanges      = "Accept-Ranges"
+	headerCacheControl      = "Cache-Control"
+	headerContentLength     = "Content-Length"
+	headerContentRange      = "Content-Range"
+	headerContentType       = "Content-Type"
+	headerETag              = "ETag"
+	headerIfNoneMatch       = "If-None-Match"
+	headerIfRange           = "If-Range"
+	headerRange             = "Range"
+	headerCORSAllowOrigin   = "Access-Control-Allow-Origin"
+	headerCORSAllowMethods  = "Access-Control-Allow-Methods"
+	headerCORSAllowHeaders  = "Access-Control-Allow-Headers"
+	headerCORSExposeHeaders = "Access-Control-Expose-Headers"
+)
+
+// Byte-range tokens from RFC 9110.
+const (
+	rangeUnitBytes   = "bytes"
+	rangeSpecPrefix  = rangeUnitBytes + "="
+	contentRangeFull = rangeUnitBytes + " %d-%d/%d"
+	contentRangeNone = rangeUnitBytes + " */%d"
+)
