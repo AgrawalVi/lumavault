@@ -1,6 +1,14 @@
 #!/bin/sh
 # shortcut: local hook because GitHub Free blocks remote branch rulesets on private repos; replace with GitHub ruleset if upgraded to Pro or made public
-if [ "$(git symbolic-ref --quiet HEAD)" = "refs/heads/main" ]; then
-  echo "error: direct commits to main are blocked; create a branch first (git switch -c <branch>)." >&2
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")"
+
+if [ "$branch" = "main" ]; then
+  echo "error: direct commits to main are blocked; create a branch first." >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$branch" | grep -Eq '^(([a-z0-9._-]+/)?lum-[0-9]+(-[a-z0-9._-]+)?|(chore|docs|ci)/[a-z0-9][a-z0-9._-]*)$'; then
+  echo "error: branch '${branch:-(detached HEAD)}' must match Linear's gitBranchName (e.g. zvishrut/lum-12-short-slug) or chore|docs|ci/<slug>." >&2
+  echo "Fetch the Linear issue's gitBranchName and run: git fetch origin && git checkout -B <gitBranchName> origin/main" >&2
   exit 1
 fi

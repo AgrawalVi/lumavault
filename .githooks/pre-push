@@ -1,8 +1,18 @@
 #!/bin/sh
 # shortcut: local hook because GitHub Free blocks remote branch rulesets on private repos; replace with GitHub ruleset if upgraded to Pro or made public
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
+while read -r _local_ref local_sha remote_ref _remote_sha; do
   if [ "$remote_ref" = "refs/heads/main" ]; then
     echo "error: direct pushes to main are blocked; push a branch and open a PR (gh pr create)." >&2
+    exit 1
+  fi
+
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) continue ;;
+  esac
+
+  branch="${remote_ref#refs/heads/}"
+  if ! printf '%s\n' "$branch" | grep -Eq '^(([a-z0-9._-]+/)?lum-[0-9]+(-[a-z0-9._-]+)?|(chore|docs|ci)/[a-z0-9][a-z0-9._-]*)$'; then
+    echo "error: remote branch '$branch' must match Linear's gitBranchName (e.g. zvishrut/lum-12-short-slug) or chore|docs|ci/<slug>." >&2
     exit 1
   fi
 done

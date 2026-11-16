@@ -1,0 +1,23 @@
+{
+  "linear-branch-guard": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH ./check-branch.py",
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH ./check-branch.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
