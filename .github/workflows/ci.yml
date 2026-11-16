@@ -62,5 +62,5 @@ jobs:
       - name: Generate Protobuf stubs
         run: buf generate
 
-      - name: Build Swift SDK
-        run: swift build
+      - name: Build and test Swift SDK
+        run: swift test
