@@ -19,7 +19,7 @@ export interface PlannedChunk {
   readonly hash: string;
   readonly offset: number;
   readonly sizeBytes: number;
-  /** Returns a lazy zero-copy slice (`Blob.slice` or `Uint8Array.subarray`) for this chunk. */
+  /** Returns a lazy zero-copy slice (Blob.slice or Uint8Array.subarray) for this chunk. */
   slice(): Blob | Uint8Array;
 }
 
@@ -48,7 +48,7 @@ export interface DataPlaneRequestOptions {
 }
 
 export interface PutChunkOptions extends DataPlaneRequestOptions {
-  /** Re-hashes `data` locally before uploading to verify it matches `sha256` (default: `false`). */
+  /** Re-hashes data locally before uploading to verify it matches sha256 (default: false). */
   verifyLocalHash?: boolean;
 }
 
@@ -58,13 +58,13 @@ export interface PutChunkResult {
 }
 
 export interface GetChunkOptions extends DataPlaneRequestOptions {
-  /** Verifies that downloaded bytes hash to `sha256` (default: `true`). */
+  /** Verifies that downloaded bytes hash to sha256 (default: true). */
   verify?: boolean;
 }
 
 export interface DownloadStreamOptions extends DataPlaneRequestOptions {
-  /** Expected whole-object SHA-256 digest; falls back to quote-stripped strong `ETag` if omitted. */
+  /** Expected whole-object SHA-256 digest; falls back to quote-stripped strong ETag if omitted. */
   expectedSha256?: string;
-  /** Maximum bytes buffered in memory before aborting with `PAYLOAD_TOO_LARGE` (default: 256 MiB). */
+  /** Maximum bytes buffered in memory before aborting as too large (default: 256 MiB). */
   maxBytes?: number;
 }

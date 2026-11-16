@@ -47,6 +47,24 @@ describe("SHA-256 hex validators and sha256Hex", () => {
     assert.equal(await sha256Hex(view), expected);
     assert.equal(await sha256Hex(new Blob([payload as Uint8Array<ArrayBuffer>])), expected);
   });
+
+  it("falls back cleanly to pure-JS Sha256 when crypto.subtle is unavailable (plain-HTTP LAN)", async () => {
+    const payload = deterministicBytes(200, 77);
+    const expected = nodeSha256(payload);
+    const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+
+    Object.defineProperty(globalThis, "crypto", {
+      value: { subtle: undefined },
+      configurable: true,
+    });
+    try {
+      assert.equal(await sha256Hex(payload), expected);
+    } finally {
+      if (originalCrypto) {
+        Object.defineProperty(globalThis, "crypto", originalCrypto);
+      }
+    }
+  });
 });
 
 describe("Sha256 incremental hasher", () => {
@@ -79,5 +97,19 @@ describe("Sha256 incremental hasher", () => {
         assert.equal(hasher.digestHex(), expected);
       }
     }
+  });
+
+  it("handles >= 512 MiB streams (totalBits >= 2^32) without 32-bit bit-length overflow", () => {
+    const oneMiB = deterministicBytes(1024 * 1024, 513);
+    const hasher = new Sha256();
+    const ref = createHash("sha256");
+
+    // 513 MiB equals 4,303,355,904 bits (above 2 to the 32), exercising the upper 32-bit length word.
+    for (let i = 0; i < 513; i++) {
+      hasher.update(oneMiB);
+      ref.update(oneMiB);
+    }
+
+    assert.equal(hasher.digestHex(), ref.digest("hex"));
   });
 });

@@ -22,7 +22,7 @@ const SHA256_K = new Uint32Array([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
-/** Returns true if `hash` is a canonical 64-character lowercase hexadecimal SHA-256 string. */
+/** Returns true if hash is a canonical 64-character lowercase hexadecimal SHA-256 string. */
 export function isValidSha256Hex(hash: string): boolean {
   return (
     typeof hash === "string" &&
@@ -31,7 +31,7 @@ export function isValidSha256Hex(hash: string): boolean {
   );
 }
 
-/** Throws a `RangeError` if `hash` is not a canonical 64-character lowercase hex SHA-256 digest. */
+/** Throws a RangeError if hash is not a canonical 64-character lowercase hex SHA-256 digest. */
 export function assertValidSha256Hex(hash: string, label = "sha256"): void {
   if (!isValidSha256Hex(hash)) {
     throw new RangeError(
@@ -41,20 +41,19 @@ export function assertValidSha256Hex(hash: string, label = "sha256"): void {
 }
 
 /**
- * Returns an `ArrayBuffer`-backed `Uint8Array` preserving exact `byteOffset` and `byteLength`
- * (zero-copy for standard `ArrayBuffer` views; copies only the slice if backed by `SharedArrayBuffer`).
+ * Adapts a Uint8Array view to a Web Crypto or Fetch BufferSource preserving exact byteOffset
+ * and byteLength (zero-copy for ArrayBuffer; copies only the slice if SharedArrayBuffer).
  */
-export function toBufferSource(view: Uint8Array): Uint8Array<ArrayBuffer> {
+export function toBufferSource(view: Uint8Array): BufferSource {
   if (view.buffer instanceof ArrayBuffer) {
-    return view as Uint8Array<ArrayBuffer>;
+    return new DataView(view.buffer, view.byteOffset, view.byteLength);
   }
   const copy = new Uint8Array(view.byteLength);
   copy.set(view);
   return copy;
 }
 
-/** Encodes raw bytes to lowercase hexadecimal string. */
-export function bytesToHex(bytes: Uint8Array): string {
+function bytesToHex(bytes: Uint8Array): string {
   let out = "";
   for (let i = 0; i < bytes.byteLength; i++) {
     out += HEX_TABLE[bytes[i]!];
@@ -62,7 +61,10 @@ export function bytesToHex(bytes: Uint8Array): string {
   return out;
 }
 
-/** Computes the lowercase hex SHA-256 digest of a single `Blob` or `Uint8Array` via Web Crypto. */
+/**
+ * Computes the lowercase hex SHA-256 digest of a single Blob or Uint8Array.
+ * Uses hardware-accelerated Web Crypto when available, falling back to Sha256 on plain-HTTP LAN origins.
+ */
 export async function sha256Hex(
   data: Blob | Uint8Array,
   signal?: AbortSignal,
@@ -74,12 +76,18 @@ export async function sha256Hex(
   }
   const bytes =
     data instanceof Uint8Array
-      ? toBufferSource(data)
+      ? data
       : new Uint8Array(await data.arrayBuffer());
   signal?.throwIfAborted();
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  signal?.throwIfAborted();
-  return bytesToHex(new Uint8Array(digest));
+
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle) {
+    const digest = await subtle.digest("SHA-256", toBufferSource(bytes));
+    signal?.throwIfAborted();
+    return bytesToHex(new Uint8Array(digest));
+  }
+
+  return new Sha256().update(bytes).digestHex();
 }
 
 /**
@@ -146,7 +154,7 @@ export class Sha256 {
     }
     padBlock.fill(0, padLen, 56);
 
-    // Use BigInt bit count so files >= 512 MiB (e.g. 50 GB+ 4K videos) never overflow 32-bit shifts.
+    // Use BigInt bit count so files of 512 MiB or larger (such as 50 GB+ 4K videos) never overflow 32-bit shifts.
     const totalBits = BigInt(this.totalBytes) * 8n;
     padView.setUint32(56, Number((totalBits >> 32n) & 0xffffffffn), false);
     padView.setUint32(60, Number(totalBits & 0xffffffffn), false);

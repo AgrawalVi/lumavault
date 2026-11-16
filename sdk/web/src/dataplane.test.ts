@@ -87,7 +87,7 @@ describe("putChunk", () => {
     assert.equal(fetchCalls, 0);
   });
 
-  it("maps HTTP 400 mismatch, 413, and 500 errors to LumaVaultDataPlaneError", async () => {
+  it("maps HTTP 400 mismatch, 413, HTML 200 fallback, and mismatched size_bytes to LumaVaultDataPlaneError", async () => {
     const payload = new TextEncoder().encode("chunk-bytes");
     const hash = sha256(payload);
 
@@ -112,11 +112,36 @@ describe("putChunk", () => {
         err.code === "PAYLOAD_TOO_LARGE" &&
         err.status === 413,
     );
+
+    await assert.rejects(
+      () =>
+        putChunk("http://localhost:8080", hash, payload, {
+          fetch: async () => new Response("<!doctype html><html>login</html>", { status: 200 }),
+        }),
+      (err: unknown) =>
+        err instanceof LumaVaultDataPlaneError &&
+        err.code === "HTTP_ERROR" &&
+        err.status === 200,
+    );
+
+    await assert.rejects(
+      () =>
+        putChunk("http://localhost:8080", hash, payload, {
+          fetch: async () =>
+            new Response(JSON.stringify({ sha256: hash, size_bytes: payload.byteLength - 1 }), {
+              status: 201,
+            }),
+        }),
+      (err: unknown) =>
+        err instanceof LumaVaultDataPlaneError &&
+        err.code === "HTTP_ERROR" &&
+        err.status === 201,
+    );
   });
 });
 
 describe("getChunk", () => {
-  it("downloads and verifies chunk bytes, throwing HASH_MISMATCH on corruption", async () => {
+  it("downloads and verifies chunk bytes, rejecting corruption, non-200, and truncated Content-Length", async () => {
     const payload = new TextEncoder().encode("verified-chunk-payload");
     const hash = sha256(payload);
 
@@ -124,6 +149,8 @@ describe("getChunk", () => {
       fetch: async () => new Response(payload, { status: 200 }),
     });
     assert.deepEqual(downloaded, payload);
+    assert.equal(downloaded.byteOffset, 0);
+    assert.equal(downloaded.buffer.byteLength, payload.byteLength);
 
     const corrupted = new Uint8Array(payload);
     corrupted[3] ^= 0xff;
@@ -136,6 +163,34 @@ describe("getChunk", () => {
       (err: unknown) =>
         err instanceof LumaVaultDataPlaneError &&
         err.code === "HASH_MISMATCH" &&
+        err.status === 200,
+    );
+
+    await assert.rejects(
+      () =>
+        getChunk("http://localhost:8080", hash, {
+          verify: false,
+          fetch: async () => new Response(payload.subarray(0, 4), { status: 206 }),
+        }),
+      (err: unknown) =>
+        err instanceof LumaVaultDataPlaneError &&
+        err.code === "HTTP_ERROR" &&
+        err.status === 206,
+    );
+
+    await assert.rejects(
+      () =>
+        getChunk("http://localhost:8080", hash, {
+          verify: false,
+          fetch: async () =>
+            new Response(payload.subarray(0, 5), {
+              status: 200,
+              headers: { "Content-Length": String(payload.byteLength) },
+            }),
+        }),
+      (err: unknown) =>
+        err instanceof LumaVaultDataPlaneError &&
+        err.code === "HTTP_ERROR" &&
         err.status === 200,
     );
 
@@ -175,7 +230,7 @@ describe("downloadStream", () => {
     assert.deepEqual(fromExpected, full);
   });
 
-  it("rejects missing ETag, weak ETag, and corrupted bytes", async () => {
+  it("rejects missing ETag, weak ETag, mismatched strong ETag fast-fail, and corrupted bytes", async () => {
     const body = new TextEncoder().encode("rom-bytes");
     const digest = sha256(body);
 
@@ -204,6 +259,40 @@ describe("downloadStream", () => {
         err.code === "INVALID_HASH" &&
         err.status === 200,
     );
+
+    let streamReadStarted = false;
+    let streamCancelledOnMismatch = false;
+    await assert.rejects(
+      () =>
+        downloadStream("http://localhost:8080", "obj-etag-mismatch", {
+          expectedSha256: EMPTY_SHA256_DIGEST,
+          fetch: async () =>
+            new Response(
+              new ReadableStream<Uint8Array>(
+                {
+                  pull(ctrl) {
+                    streamReadStarted = true;
+                    ctrl.enqueue(body);
+                  },
+                  cancel() {
+                    streamCancelledOnMismatch = true;
+                  },
+                },
+                { highWaterMark: 0 },
+              ),
+              {
+                status: 200,
+                headers: { ETag: `"${digest}"` },
+              },
+            ),
+        }),
+      (err: unknown) =>
+        err instanceof LumaVaultDataPlaneError &&
+        err.code === "HASH_MISMATCH" &&
+        err.status === 200,
+    );
+    assert.equal(streamReadStarted, false);
+    assert.equal(streamCancelledOnMismatch, true);
 
     const flipped = new Uint8Array(body);
     flipped[0] ^= 0x01;

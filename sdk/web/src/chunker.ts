@@ -6,7 +6,7 @@ import {
   MIN_CHUNK_SIZE_BYTES,
 } from "./constants.js";
 import { Namespace } from "./gen/lumavault/v1/storage_pb.js";
-import { Sha256, bytesToHex, toBufferSource } from "./sha256.js";
+import { Sha256, sha256Hex } from "./sha256.js";
 import type {
   ChunkPlan,
   PlannedChunk,
@@ -24,10 +24,8 @@ export {
 export {
   Sha256,
   assertValidSha256Hex,
-  bytesToHex,
   isValidSha256Hex,
   sha256Hex,
-  toBufferSource,
 } from "./sha256.js";
 export type {
   ChunkHashProgress,
@@ -49,7 +47,7 @@ export function defaultChunkSizeForNamespace(namespace: Namespace): number {
   }
 }
 
-/** Returns true if `chunkSizeBytes` is an integer within `[4 MiB, 64 MiB]`. */
+/** Returns true if chunkSizeBytes is an integer from 4 MiB through 64 MiB. */
 export function isValidChunkSize(chunkSizeBytes: number): boolean {
   return (
     Number.isSafeInteger(chunkSizeBytes) &&
@@ -58,7 +56,7 @@ export function isValidChunkSize(chunkSizeBytes: number): boolean {
   );
 }
 
-/** Throws a `RangeError` if `chunkSizeBytes` is outside `[4 MiB, 64 MiB]`. */
+/** Throws a RangeError if chunkSizeBytes is outside 4 MiB through 64 MiB. */
 export function assertValidChunkSize(chunkSizeBytes: number): void {
   if (!isValidChunkSize(chunkSizeBytes)) {
     throw new RangeError(
@@ -67,9 +65,21 @@ export function assertValidChunkSize(chunkSizeBytes: number): void {
   }
 }
 
+// Isolated outside prepareChunkPlan so retained PlannedChunk.slice closures never pin per-chunk
+// chunkBytes buffers inside debugger or inspector block contexts on 50 GB+ files.
+function createChunkSlice(
+  input: Blob | Uint8Array,
+  offset: number,
+  end: number,
+): () => Blob | Uint8Array {
+  return input instanceof Uint8Array
+    ? () => input.subarray(offset, end)
+    : () => input.slice(offset, end);
+}
+
 /**
- * Slices a `Blob`/`File` or `Uint8Array` into fixed-size chunks and computes per-chunk plus
- * whole-file `SHA-256` digests in a single pass while holding at most one chunk in memory.
+ * Slices a Blob, File, or Uint8Array into fixed-size chunks and computes per-chunk plus
+ * whole-file SHA-256 digests in a single pass while holding at most one chunk in memory.
  */
 export async function prepareChunkPlan(
   input: Blob | Uint8Array,
@@ -82,21 +92,20 @@ export async function prepareChunkPlan(
     throw new TypeError("input must be a Blob, File, or Uint8Array");
   }
 
-  let chunkSizeBytes: number;
+  const namespaceDefault =
+    options.namespace !== undefined
+      ? defaultChunkSizeForNamespace(options.namespace)
+      : DEFAULT_CHUNK_SIZE_BYTES;
+  const chunkSizeBytes = options.chunkSizeBytes ?? namespaceDefault;
   if (options.chunkSizeBytes !== undefined) {
-    if (options.namespace !== undefined) {
-      defaultChunkSizeForNamespace(options.namespace);
-    }
-    assertValidChunkSize(options.chunkSizeBytes);
-    chunkSizeBytes = options.chunkSizeBytes;
-  } else if (options.namespace !== undefined) {
-    chunkSizeBytes = defaultChunkSizeForNamespace(options.namespace);
-  } else {
-    chunkSizeBytes = DEFAULT_CHUNK_SIZE_BYTES;
+    assertValidChunkSize(chunkSizeBytes);
   }
 
   const isBytes = input instanceof Uint8Array;
   const sizeBytes = isBytes ? input.byteLength : input.size;
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    throw new RangeError(`Invalid input byte length: ${String(sizeBytes)}`);
+  }
 
   if (sizeBytes === 0) {
     onProgress?.({ hashedBytes: 0, totalBytes: 0, chunkIndex: 0, totalChunks: 0 });
@@ -119,13 +128,13 @@ export async function prepareChunkPlan(
     const end = offset + len;
 
     const chunkBytes = isBytes
-      ? toBufferSource(input.subarray(offset, end))
+      ? input.subarray(offset, end)
       : new Uint8Array(await input.slice(offset, end).arrayBuffer());
     signal?.throwIfAborted();
 
-    const digestPromise = globalThis.crypto.subtle.digest("SHA-256", chunkBytes);
+    const digestPromise = sha256Hex(chunkBytes, signal);
     wholeFileHasher?.update(chunkBytes);
-    const chunkHash = bytesToHex(new Uint8Array(await digestPromise));
+    const chunkHash = await digestPromise;
     signal?.throwIfAborted();
 
     chunks.push({
@@ -133,7 +142,7 @@ export async function prepareChunkPlan(
       hash: chunkHash,
       offset,
       sizeBytes: len,
-      slice: () => (isBytes ? input.subarray(offset, end) : input.slice(offset, end)),
+      slice: createChunkSlice(input, offset, end),
     });
 
     onProgress?.({

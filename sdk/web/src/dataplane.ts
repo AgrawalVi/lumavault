@@ -27,19 +27,66 @@ export type {
   PutChunkOptions,
   PutChunkResult,
 } from "./types.js";
-export { getChunkUrl, getStreamUrl, normalizeBaseUrl } from "./urls.js";
+export { getChunkUrl, getStreamUrl } from "./urls.js";
 
-async function readErrorText(response: Response): Promise<string> {
-  try {
-    const text = (await response.text()).trim();
-    return text.length > 512 ? `${text.slice(0, 512)}...` : text;
-  } catch {
-    return "";
-  }
+const MAX_ERROR_BODY_BYTES = 1024;
+
+function resolveFetch(customFetch?: typeof globalThis.fetch): typeof globalThis.fetch {
+  return customFetch ?? ((input, init) => globalThis.fetch(input, init));
 }
 
-async function toHttpError(response: Response, context: string): Promise<LumaVaultDataPlaneError> {
-  const detail = await readErrorText(response);
+async function readErrorText(response: Response, signal?: AbortSignal): Promise<string> {
+  if (!response.body) {
+    return "";
+  }
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    while (total < MAX_ERROR_BODY_BYTES) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) {
+        break;
+      }
+      const slice =
+        total + value.byteLength > MAX_ERROR_BODY_BYTES
+          ? value.subarray(0, MAX_ERROR_BODY_BYTES - total)
+          : value;
+      parts.push(slice);
+      total += slice.byteLength;
+      if (total >= MAX_ERROR_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
+    }
+  } catch (err) {
+    signal?.throwIfAborted();
+    void err;
+    return "";
+  } finally {
+    reader.releaseLock();
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  const text = new TextDecoder().decode(merged).trim();
+  return text.length > 512 ? `${text.slice(0, 512)}...` : text;
+}
+
+async function toHttpError(
+  response: Response,
+  context: string,
+  signal?: AbortSignal,
+): Promise<LumaVaultDataPlaneError> {
+  const detail = await readErrorText(response, signal);
+  signal?.throwIfAborted();
   const suffix = detail ? `: ${detail}` : "";
   const status = response.status;
 
@@ -124,6 +171,13 @@ async function readResponseBytes(
   }
 
   if (!response.body) {
+    if (declaredLength !== null && declaredLength !== 0) {
+      throw new LumaVaultDataPlaneError(
+        "HTTP_ERROR",
+        `Response body truncated: expected ${declaredLength} bytes, got 0 bytes`,
+        { status: response.status },
+      );
+    }
     return new Uint8Array(0);
   }
 
@@ -170,11 +224,22 @@ async function readResponseBytes(
     reader.releaseLock();
   }
 
+  if (declaredLength !== null && totalBytes !== declaredLength) {
+    throw new LumaVaultDataPlaneError(
+      "HTTP_ERROR",
+      `Response body truncated: expected ${declaredLength} bytes, got ${totalBytes} bytes`,
+      { status: response.status },
+    );
+  }
+
   if (chunks.length === 0) {
     return new Uint8Array(0);
   }
   if (chunks.length === 1) {
-    return chunks[0]!;
+    const single = chunks[0]!;
+    return single.byteOffset === 0 && single.byteLength === single.buffer.byteLength
+      ? single
+      : single.slice();
   }
 
   const out = new Uint8Array(totalBytes);
@@ -187,8 +252,8 @@ async function readResponseBytes(
 }
 
 /**
- * Uploads a single chunk (`Blob` or `Uint8Array`) via `PUT /v1/chunks/{sha256}`, validating
- * `{sha256}` and `MAX_CHUNK_SIZE_BYTES` locally before sending bytes over the wire.
+ * Uploads a single chunk (Blob or Uint8Array) via PUT /v1/chunks/{sha256}, validating
+ * sha256 and maximum chunk size locally before sending bytes over the wire.
  */
 export async function putChunk(
   baseUrl: string,
@@ -197,7 +262,8 @@ export async function putChunk(
   options: PutChunkOptions = {},
 ): Promise<PutChunkResult> {
   const url = getChunkUrl(baseUrl, sha256);
-  const { signal, fetch: fetchFn = globalThis.fetch, verifyLocalHash = false } = options;
+  const { signal, verifyLocalHash = false } = options;
+  const doFetch = resolveFetch(options.fetch);
   signal?.throwIfAborted();
 
   if (!(data instanceof Uint8Array) && !(data instanceof Blob)) {
@@ -223,7 +289,7 @@ export async function putChunk(
   }
 
   const body: BodyInit = data instanceof Uint8Array ? toBufferSource(data) : data;
-  const response = await fetchFn(url, {
+  const response = await doFetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/octet-stream" },
     body,
@@ -231,26 +297,51 @@ export async function putChunk(
   });
 
   if (!response.ok) {
-    throw await toHttpError(response, `PUT /v1/chunks/${sha256}`);
+    throw await toHttpError(response, `PUT /v1/chunks/${sha256}`, signal);
+  }
+  if (response.status !== 200 && response.status !== 201) {
+    await cancelBodyQuietly(response);
+    throw new LumaVaultDataPlaneError(
+      "HTTP_ERROR",
+      `Expected HTTP 200 or 201 for PUT /v1/chunks/${sha256}, got HTTP ${response.status}`,
+      { status: response.status },
+    );
   }
 
-  const rawBody = (await response.text()).trim();
+  const rawBytes = await readResponseBytes(response, MAX_ERROR_BODY_BYTES, signal);
+  const rawBody = new TextDecoder().decode(rawBytes).trim();
   if (rawBody.length > 0) {
-    let parsed: { sha256?: unknown; size_bytes?: unknown } | null = null;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(rawBody) as { sha256?: unknown; size_bytes?: unknown };
-    } catch {
-      parsed = null;
-    }
-    if (parsed && typeof parsed.sha256 === "string" && parsed.sha256 !== sha256) {
+      parsed = JSON.parse(rawBody);
+    } catch (cause) {
       throw new LumaVaultDataPlaneError(
-        "HASH_MISMATCH",
-        `Server returned mismatched SHA-256: expected ${sha256}, got ${parsed.sha256}`,
+        "HTTP_ERROR",
+        `Invalid JSON response from PUT /v1/chunks/${sha256}`,
+        { status: response.status, cause },
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new LumaVaultDataPlaneError(
+        "HTTP_ERROR",
+        `Unexpected JSON payload from PUT /v1/chunks/${sha256}`,
         { status: response.status },
       );
     }
-    if (parsed && typeof parsed.size_bytes === "number" && Number.isSafeInteger(parsed.size_bytes)) {
-      return { sha256, sizeBytes: parsed.size_bytes };
+    const record = parsed as { sha256?: unknown; size_bytes?: unknown };
+    if (record.sha256 !== undefined && record.sha256 !== sha256) {
+      throw new LumaVaultDataPlaneError(
+        "HASH_MISMATCH",
+        `Server returned mismatched SHA-256: expected ${sha256}, got ${String(record.sha256)}`,
+        { status: response.status },
+      );
+    }
+    if (record.size_bytes !== undefined && record.size_bytes !== sizeBytes) {
+      throw new LumaVaultDataPlaneError(
+        "HTTP_ERROR",
+        `Server reported size_bytes=${String(record.size_bytes)}, expected ${sizeBytes}`,
+        { status: response.status },
+      );
     }
   }
 
@@ -258,8 +349,8 @@ export async function putChunk(
 }
 
 /**
- * Downloads a single chunk via `GET /v1/chunks/{sha256}` and verifies its `SHA-256` digest
- * against `{sha256}` by default before returning the bytes.
+ * Downloads a single chunk via GET /v1/chunks/{sha256} and verifies its SHA-256 digest
+ * against sha256 by default before returning the bytes.
  */
 export async function getChunk(
   baseUrl: string,
@@ -267,16 +358,25 @@ export async function getChunk(
   options: GetChunkOptions = {},
 ): Promise<Uint8Array> {
   const url = getChunkUrl(baseUrl, sha256);
-  const { signal, fetch: fetchFn = globalThis.fetch, verify = true } = options;
+  const { signal, verify = true } = options;
+  const doFetch = resolveFetch(options.fetch);
   signal?.throwIfAborted();
 
-  const response = await fetchFn(url, {
+  const response = await doFetch(url, {
     method: "GET",
     signal,
   });
 
   if (!response.ok) {
-    throw await toHttpError(response, `GET /v1/chunks/${sha256}`);
+    throw await toHttpError(response, `GET /v1/chunks/${sha256}`, signal);
+  }
+  if (response.status !== 200) {
+    await cancelBodyQuietly(response);
+    throw new LumaVaultDataPlaneError(
+      "HTTP_ERROR",
+      `Expected HTTP 200 OK for GET /v1/chunks/${sha256}, got HTTP ${response.status}`,
+      { status: response.status },
+    );
   }
 
   const bytes = await readResponseBytes(response, MAX_CHUNK_SIZE_BYTES, signal);
@@ -295,9 +395,9 @@ export async function getChunk(
 }
 
 /**
- * Downloads a full object stream via `GET /v1/stream/{objectId}` into memory with a streaming
- * `maxBytes` cap (default `256 MiB`) and verifies its `SHA-256` digest against `expectedSha256`
- * or a quote-stripped strong `ETag` response header.
+ * Downloads a full object stream via GET /v1/stream/{objectId} into memory with a streaming
+ * maxBytes cap (default 256 MiB) and verifies its SHA-256 digest against expectedSha256
+ * or a quote-stripped strong ETag response header.
  */
 export async function downloadStream(
   baseUrl: string,
@@ -307,10 +407,10 @@ export async function downloadStream(
   const url = getStreamUrl(baseUrl, objectId);
   const {
     signal,
-    fetch: fetchFn = globalThis.fetch,
     expectedSha256,
     maxBytes = DEFAULT_MAX_DOWNLOAD_BYTES,
   } = options;
+  const doFetch = resolveFetch(options.fetch);
 
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new RangeError(`maxBytes must be a non-negative safe integer, got ${String(maxBytes)}`);
@@ -320,13 +420,13 @@ export async function downloadStream(
   }
   signal?.throwIfAborted();
 
-  const response = await fetchFn(url, {
+  const response = await doFetch(url, {
     method: "GET",
     signal,
   });
 
   if (!response.ok) {
-    throw await toHttpError(response, `GET /v1/stream/${encodeURIComponent(objectId)}`);
+    throw await toHttpError(response, `GET /v1/stream/${encodeURIComponent(objectId)}`, signal);
   }
   if (response.status !== 200) {
     await cancelBodyQuietly(response);
@@ -337,8 +437,17 @@ export async function downloadStream(
     );
   }
 
-  const targetSha256 =
-    expectedSha256 ?? parseStrongEtagSha256(response.headers.get("ETag"));
+  const etagSha256 = parseStrongEtagSha256(response.headers.get("ETag"));
+  if (expectedSha256 !== undefined && etagSha256 !== null && etagSha256 !== expectedSha256) {
+    await cancelBodyQuietly(response);
+    throw new LumaVaultDataPlaneError(
+      "HASH_MISMATCH",
+      `Stream ETag mismatch for "${objectId}": expected ${expectedSha256}, got ${etagSha256}`,
+      { status: response.status },
+    );
+  }
+
+  const targetSha256 = expectedSha256 ?? etagSha256;
   if (!targetSha256) {
     await cancelBodyQuietly(response);
     throw new LumaVaultDataPlaneError(

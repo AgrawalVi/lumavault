@@ -10,7 +10,7 @@ export const DEFAULT_CHUNK_SIZE_BYTES = MIN_CHUNK_SIZE_BYTES;
 /** Default chunk size (64 MiB) for high-bitrate Cinema media. */
 export const CINEMA_CHUNK_SIZE_BYTES = MAX_CHUNK_SIZE_BYTES;
 
-/** Default maximum in-memory download size (256 MiB) enforced by `downloadStream`. */
+/** Default maximum in-memory download size (256 MiB) enforced by downloadStream. */
 export const DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
 /** Exact character length of a hex-encoded SHA-256 digest. */
