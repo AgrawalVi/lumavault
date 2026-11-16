@@ -92,7 +92,7 @@ flowchart TD
    - Multi-tenant commits pass `skip_dedup = true` to `StorageService.CommitObject` so every household owns an independent `ObjectMetadata` manifest (`object_id`)—preventing cross-household delete interference and existence side-channels—while `ChunkStore` still deduplicates **100% of identical `4–64 MiB` `SHA-256` chunks on disk** via `chunkRefs`. Intra-household duplicate prevention is enforced in PostgreSQL (`UNIQUE (household_id, sha256_digest)`).
 
 ### B. `ChunkStore` (The Data Plane: Chunking, Deduplication & Safety)
-1. **Fixed-Size Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Files are sliced into immutable `4MB–64MB` chunks (`4MB` for photos/ROMs/saves, `64MB` for 4K remuxes) plus thumbnail blobs, streamed in `32KB` buffers (`~32KB` server RAM per active stream). `chunk_size_bytes` on `ObjectMetadata` enables $O(1)$ `HTTP 206` byte-range seeking (`offset / chunk_size_bytes`).
+1. **Fixed-Size Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Files are sliced into immutable `4MB–64MB` chunks plus thumbnail blobs. The client SDKs pick the chunk size from the file size: start at 4 MiB and double until the file fits in at most 256 chunks, capped at 64 MiB (photos, ROMs, and saves land on 4 MiB; files over 8 GiB land on 64 MiB). The rule is deterministic so identical files always share chunks, streamed in `32KB` buffers (`~32KB` server RAM per active stream). `chunk_size_bytes` on `ObjectMetadata` enables $O(1)$ `HTTP 206` byte-range seeking (`offset / chunk_size_bytes`).
 2. **24h GC Lease Renewal:** `HasChunks` and `PutChunk` touch `mtime` (`os.Chtimes`) on existing chunks so slow or resumed uploads receive a fresh 24-hour garbage collection grace window.
 3. **Day-1 `LocalChunkStore` -> Drop-In `ReplicatedChunkStore` ($N=3$):** Starts with sharded local disk blobs (`StatChunks` pre-commit size verification + `ReadChunkRange`), upgrading behind `ChunkStore` to $N=3$ gRPC chunkservers, background `SHA-256` bit-rot scrubbing, and predicate-driven GC (`MetadataStore.IsChunkReferenced`).
 
@@ -104,7 +104,18 @@ flowchart TD
 
 ## 3. Client SDKs (`sdk/web`, `sdk/swift`) & Headless Shared Primitives (`packages/ui`)
 
-SDK design is being redone from scratch. Only the package scaffolding (`sdk/web/package.json`, `sdk/web/tsconfig.json`, `Package.swift`, and the Buf codegen targets) exists today. The SDK architecture will be specified here once the new design is approved.
+The SDKs let apps upload, download, and stream files through the Storage Gateway without re-implementing chunking, hashing, or the HTTP data plane. Version 1 talks to the gateway as it exists today, with no Signed Storage Tickets yet. The web SDK leads and the Swift SDK mirrors its API.
+
+1. **Web / TypeScript SDK (`sdk/web/` — `@lumavault/sdk`):** One client created from a gateway base URL, for browsers and Node 20 or newer.
+   - Upload in one call: split the input (a Blob, File, or Uint8Array) into chunks by the chunk size rule, hash each chunk with Web Crypto and the whole file with hash-wasm, ask `HasChunks` which chunks are missing, upload only those (4 at a time by default), then commit with `skip_dedup` always on. Re-running an upload within the chunk GC grace window re-hashes the file but re-sends nothing.
+   - Verified download returns a ReadableStream. Each chunk is checked against its SHA-256 before it is passed on, and the whole-file SHA-256 is checked at the end.
+   - Large media saves skip the SDK and use the stream URL as a normal browser download. These are not hash-checked on the client.
+   - Builds stream URLs for video players and walks every page of `ListObjects`.
+   - Empty files are rejected before any network call.
+2. **Swift SDK (`sdk/swift/` — `LumaVaultSDK`):** The same client on URLSession, CryptoKit, and Connect-Swift. It reads files from disk and streams each chunk from the file, so parallel uploads never hold whole chunks in memory. Verified download writes to a file.
+   - **Shared rules:** Both SDKs test against the same vectors in `sdk/testdata/chunk-vectors.json`, so they always produce identical chunks and hashes.
+   - **Errors:** Every failure is Connect's own ConnectError, in both languages. Data plane HTTP failures map onto Connect codes (400 and 413 to `invalid_argument`, 404 to `not_found`, 500 to `internal`, other 5xx and network failures to `unavailable`, hash mismatch on download to `data_loss`). App-specific errors become typed detail messages in each app's proto, so the error type never grows.
+   - **Scope:** The SDKs stay storage-only. App services (`IamService`, `PhotosService`, `CinemaService`, `ArcadeService`) are called through their generated clients, with no hand-written per-app code in the SDKs. `CommitObject` is never retried automatically; an `apps/api` worker cleans up committed objects that Postgres never recorded.
 3. **Headless Web Primitives (`packages/ui/` — `@lumavault/ui`):**
    - Exports headless `better-auth` SSO / Household hooks (`useSession`, `useActiveHousehold`, `AuthGuard`), a theme-inheriting `<ShareDialog />`, and CSS-variable Radix/`shadcn` primitives—imposing **zero shared navbar or visual theme** so each SPA owns a distinct product aesthetic.
 
