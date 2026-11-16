@@ -21,22 +21,24 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
 
 **Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and running `make proto`. Generated stubs (`gen/go/`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`) are gitignored.
 
-| Linear Project | Owned Paths |
-| :--- | :--- |
-| **`P-LUM-1` Core Backend, Contracts & Basic Data Layer** | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `docker-compose.yml`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/constants/`, `pkg/validate/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
-| **`P-LUM-2` Client SDKs (Web/TypeScript & Swift)** | `sdk/web/`, `sdk/swift/`, `Package.swift` |
-| **`P-LUM-3` LumaVault Photos** | `apps/photos/` |
-| **`P-LUM-4` LumaVault Cinema** | `apps/cinema/` |
-| **`P-LUM-5` LumaVault Arcade** | `apps/arcade/` |
-| **`P-LUM-6` Distributed Systems Upgrades** | `proto/lumavault/v1/paxos.proto`, `proto/lumavault/v1/chunk.proto`, `pkg/consensus/`, `pkg/chunkserver/` |
+| Execution Order & Project | Linear ID | Owned Paths |
+| :--- | :--- | :--- |
+| **`1. Core Backend, Contracts & Basic Data Layer`** | `P-LUM-1` | `proto/lumavault/v1/storage.proto`, `buf.*`, `Makefile`, `docker-compose.yml`, `.gitignore`, `go.*`, `Package.swift`, `sdk/web/package.json`, `sdk/web/tsconfig.json`, `pkg/constants/`, `pkg/validate/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/gateway/`, `cmd/lumavault/` |
+| **`2. Client SDKs (Web/TypeScript & Swift)`** | `P-LUM-2` | `sdk/web/`, `sdk/swift/`, `Package.swift`, `Makefile` (SDK test targets) |
+| **`3. App Platform, Auth & Multi-Tenant RBAC`** | `P-LUM-7` | `pnpm-workspace.yaml`, `proto/lumavault/iam/v1/iam.proto`, `packages/ui/`, `apps/portal/`, `apps/api/` *(excluding per-app `schemas/{photos,cinema,arcade}.ts`, `routers/{photos,cinema,arcade}.ts`, and `workers/photos*.ts`)* |
+| **`4. LumaVault Photos`** | `P-LUM-3` | `proto/lumavault/photos/v1/photos.proto`, `apps/api/src/db/schemas/photos.ts`, `apps/api/src/routers/photos.ts`, `apps/api/src/workers/photos*.ts`, `apps/photos/` |
+| **`5. LumaVault Cinema`** | `P-LUM-4` | `proto/lumavault/cinema/v1/cinema.proto`, `apps/api/src/db/schemas/cinema.ts`, `apps/api/src/routers/cinema.ts`, `apps/cinema/` |
+| **`6. LumaVault Arcade`** | `P-LUM-5` | `proto/lumavault/arcade/v1/arcade.proto`, `apps/api/src/db/schemas/arcade.ts`, `apps/api/src/routers/arcade.ts`, `apps/arcade/` |
+| **`7. Distributed Systems Upgrades (Paxos & Chunkservers)`** | `P-LUM-6` | `proto/lumavault/v1/paxos.proto`, `proto/lumavault/v1/chunk.proto`, `pkg/consensus/`, `pkg/chunkserver/` |
 
 ## 2. Core Architectural Invariants
 
-1. **Pure Storage Core vs. PostgreSQL Application Layer:**
-   - **LumaVault Storage Core (`pkg/gateway/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/consensus/`, `pkg/chunkserver/`):** Stores **only** content-addressed object manifests (`ObjectMetadata`: `id`, `namespace`, `filename`, `mime_type`, `size_bytes`, `chunk_size_bytes`, `sha256_digest`, `chunk_hashes`, `thumbnail_chunk_hash`, `created_at`, `updated_at`) and immutable `SHA-256` chunks. The Gateway talks **only** to the `MetadataStore` and `ChunkStore` Go interfaces—never directly to local disk files or Paxos/Chunkserver internals.
-   - **PostgreSQL Application Layer (`docker-compose.yml` + `apps/*`):** All application-specific domain metadata, relational queries, and mutable user state (Photo albums, EXIF, Live Photo pairing, trash retention; Cinema TMDB catalog, seasons/episodes, and `playback_position_ms` watch state; Arcade IGDB catalog, consoles, and monotonic save version lineage `v1, v2, v3...`) live in the shared **PostgreSQL** instance referencing `lumavault_object_id`.
-2. **Content-Addressed Chunks (`4MB–64MB` over Raw HTTP):** Raw media bytes never enter `MetadataStore`, PostgreSQL, the Paxos log, or Protobuf messages. All blobs are sliced into `SHA-256` verified chunks (`4MB–64MB`, with `chunk_size_bytes` recorded on `ObjectMetadata` for $O(1)$ byte-range seeking) and streamed directly via `PUT /v1/chunks/{sha256}` and `GET /v1/chunks/{sha256}` in `ChunkStore`.
-3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** A single `connectrpc/go` Gateway handler serves Connect, binary gRPC, and gRPC-Web for the Storage Control Plane (`StorageService`: `HasChunks`, `CommitObject`, `GetObject`, `ListObjects`, `UpdateObjectMetadata`, `DeleteObject`), alongside raw HTTP Data Plane endpoints (`PUT /v1/chunks/{sha256}`, `GET /v1/chunks/{sha256}`, and `HTTP 206 Partial Content` `GET /v1/stream/{object_id}`) so both `sdk/web` (`@connectrpc/connect-web`) and `sdk/swift` (`connectrpc/swift`) work out of the box without separate `grpc-go` server boilerplate.
+1. **Pure Storage Core vs. Multi-Tenant Hono + PostgreSQL Application Layer:**
+   - **LumaVault Storage Core (`pkg/gateway/`, `pkg/metadata/`, `pkg/chunkstore/`, `pkg/consensus/`, `pkg/chunkserver/`):** Stores **only** content-addressed object manifests (`ObjectMetadata`) and immutable `SHA-256` chunks. The Gateway (`:8080`) talks **only** to `MetadataStore` and `ChunkStore` and verifies requests statelessly via HMAC/Ed25519 **Signed Storage Tickets**—never querying PostgreSQL or holding domain logic.
+   - **Headless Multi-Tenant App API & PostgreSQL Layer (`apps/api` `:4000` + `docker-compose.yml` `:5432`):** All authentication (`better-auth` SSO + Bearer), Server Super-Admin household allowances/quotas, cross-household RBAC grants (`iam`), external metadata (`TMDB`, `IGDB`), background media/retention workers, and mutable domain state (`photos`, `cinema`, `arcade` Drizzle schemas) live in PostgreSQL behind the headless **Node.js + Hono** Connect-RPC server (`apps/api`), referencing `lumavault_object_id`.
+   - **Pure Client Frontends (`apps/portal`, `apps/{photos,cinema,arcade}/web` Vite SPAs + `apple/` SwiftUI):** Web apps are pure client-side Vite + React 19 + TanStack Router/Query SPAs (zero SSR servers in prod), sharing headless hooks/primitives from `@lumavault/ui` while maintaining independent visual design systems.
+2. **Content-Addressed Chunks (`4MB–64MB` over Raw HTTP) & Household Isolation:** Raw media bytes never enter `MetadataStore`, PostgreSQL, `apps/api` client proxy paths, the Paxos log, or Protobuf messages. Multi-tenant uploads commit with `skip_dedup = true` at the Storage Core (so each household owns an isolated `ObjectMetadata` manifest while `ChunkStore` still deduplicates 100% of identical `SHA-256` chunks on disk via `chunkRefs`).
+3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** `connectrpc/go` on `:8080` (`StorageService`) and `@connectrpc/connect` on `:4000` (`IamService`, `PhotosService`, `CinemaService`, `ArcadeService`) serve both `@lumavault/sdk` (`sdk/web`) and `LumaVaultSDK` (`sdk/swift`) from a single `buf generate` pipeline.
 4. **No Media in Git:** Never commit copyrighted media, ROMs, BIOS files, or `.env` secrets to the repository.
 
 ## 3. Code Conventions (All Languages)
@@ -97,9 +99,9 @@ Better:
 ## 5. Standard Commands
 
 - `make proto` — Run `buf lint` and `buf generate` (Go, Swift, and TypeScript/Connect-ES stubs).
-- `make lint` — Run `buf lint`, `go vet ./...`, and SDK static checks.
-- `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK tests.
-- `make build` — Compile `cmd/lumavault`.
+- `make lint` — Run `buf lint`, `go vet ./...`, and SDK/workspace static checks.
+- `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK/app tests.
+- `make build` — Compile `cmd/lumavault` and workspace packages.
 
 ## 6. Ticket Workflow (Branch, PR, Linear)
 
