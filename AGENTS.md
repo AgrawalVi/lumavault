@@ -35,14 +35,26 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 3. **Dual Client Support (Web + Swift via Connect-RPC + Raw HTTP Data Plane):** A single `connectrpc/go` Gateway handler serves Connect, binary gRPC, and gRPC-Web for the Storage Control Plane (`StorageService`: `HasChunks`, `CommitObject`, `GetObject`, `ListObjects`, `UpdateObjectMetadata`, `DeleteObject`), alongside raw HTTP Data Plane endpoints (`PUT /v1/chunks/{sha256}`, `GET /v1/chunks/{sha256}`, and `HTTP 206 Partial Content` `GET /v1/stream/{object_id}`) so both `sdk/web` (`@connectrpc/connect-web`) and `sdk/swift` (`connectrpc/swift`) work out of the box without separate `grpc-go` server boilerplate.
 4. **No Media in Git:** Never commit copyrighted media, ROMs, BIOS files, or `.env` secrets to the repository.
 
-## 3. Standard Commands
+## 3. Code Conventions (All Languages)
+
+1. **No Markdown syntax in code comments, ever.** No backticks, `**bold**`, `_italics_`, `#` headings, `[links](...)`, or bullet lists inside `//`, `/** */`, `///`, or `#` comments (Go, TypeScript, Swift, Protobuf, shell). Write identifiers and paths as plain text: `Uploads via PUT /v1/chunks/{sha256} and returns the stored size.` not ``Uploads via `PUT /v1/chunks/{sha256}`...``. Markdown belongs only in `.md` files.
+2. **Organization over file count.** Never be afraid of extra files when they buy clearer separation. Each file owns one concern:
+   - Public contracts and types (interfaces, option/result types) live apart from implementations (mirror `pkg/chunkstore/store.go` vs `local.go`, `pkg/metadata/store.go` vs `engine.go` vs `local.go`).
+   - Constants live in a dedicated constants file or package, never inline in core logic.
+   - Validation, URL building, HTTP/body helpers, concurrency primitives, and other utilities live in their own focused modules, not inside the client or service they support.
+   - One canonical implementation per helper (one hash validator, one object ID validator, one fetch resolver). Do not duplicate helpers across files with drifting rules.
+   - One public entrypoint per package (`index.ts`, the Go package itself). Internal modules do not re-export each other's symbols.
+   - Split any file that mixes orchestration with helpers or grows past roughly 300 lines of non-test code.
+3. **The user makes design decisions, not the agent.** Whenever work reaches a fork (API shape, error model, wire contract, file/module layout, dependency choice, default values, naming of public symbols, behavior the spec does not pin down), stop and ask a clarifying question with the concrete options and their trade-offs before writing code. Do not pick a default silently and move on, and do not invent wire contracts (HTTP response bodies, headers, error strings) that the Gateway or `proto/` does not already define.
+
+## 4. Standard Commands
 
 - `make proto` — Run `buf lint` and `buf generate` (Go, Swift, and TypeScript/Connect-ES stubs).
 - `make lint` — Run `buf lint`, `go vet ./...`, and SDK static checks.
 - `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK tests.
 - `make build` — Compile `cmd/lumavault`.
 
-## 4. Branch, Pull Request & Linear Linking Workflow
+## 5. Branch, Pull Request & Linear Linking Workflow
 
 Never commit or push directly to `main`, and never keep Antigravity's auto-generated worktree branch slug. Every change follows this lifecycle:
 1. **Step 0 — Reset Worktree Branch Before Editing Repo Files:**
