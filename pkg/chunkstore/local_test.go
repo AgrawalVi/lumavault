@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/AgrawalVi/lumavault/pkg/constants"
 )
 
 func sha256Hex(data []byte) string {
@@ -157,7 +159,7 @@ func TestPutChunkRejectsOversizedPayloadAndCleansTempFile(t *testing.T) {
 	store := newTestStore(t)
 
 	dummyHash := strings.Repeat("a", 64)
-	oversized := &zeroReader{remaining: MaxChunkSizeBytes + 1}
+	oversized := &zeroReader{remaining: constants.MaxChunkSizeBytes + 1}
 
 	_, err := store.PutChunk(ctx, dummyHash, oversized)
 	if !errors.Is(err, ErrChunkTooLarge) {
