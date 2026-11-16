@@ -5,8 +5,6 @@ import (
 	"errors"
 	"io"
 	"time"
-
-	"github.com/lumavault/lumavault/pkg/constants"
 )
 
 const (
@@ -58,18 +56,4 @@ type ChunkStore interface {
 	// than gracePeriod is checked via isReferenced(hash) and deleted if unreferenced. Stale temporary
 	// staging files older than gracePeriod are also removed. Returns the number of deleted files.
 	GarbageCollect(ctx context.Context, isReferenced func(hash string) (bool, error), gracePeriod time.Duration) (int, error)
-}
-
-// ValidateHash checks that hash is a valid 64-character lowercase hexadecimal SHA-256 string.
-func ValidateHash(hash string) error {
-	if len(hash) != constants.SHA256HexLen {
-		return ErrInvalidHash
-	}
-	for i := 0; i < len(hash); i++ {
-		c := hash[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return ErrInvalidHash
-		}
-	}
-	return nil
 }

@@ -6,10 +6,8 @@ package metadata
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
-	"github.com/lumavault/lumavault/pkg/constants"
 )
 
 const (
@@ -61,19 +59,4 @@ type MetadataStore interface {
 	// IsChunkReferenced reports whether at least one committed object currently references
 	// the given 64-character lowercase hex SHA-256 chunk hash (in chunk_hashes or thumbnail_chunk_hash).
 	IsChunkReferenced(ctx context.Context, hash string) (bool, error)
-}
-
-// ValidateHash verifies that hash is a canonical 64-character lowercase hexadecimal SHA-256 digest.
-// Returns ErrInvalidArgument if the hash is malformed.
-func ValidateHash(hash string) error {
-	if len(hash) != constants.SHA256HexLen {
-		return fmt.Errorf("%w: hash %q must be %d lowercase hex characters", ErrInvalidArgument, hash, constants.SHA256HexLen)
-	}
-	for i := 0; i < len(hash); i++ {
-		c := hash[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return fmt.Errorf("%w: hash %q contains non-lowercase-hex character %q at index %d", ErrInvalidArgument, hash, c, i)
-		}
-	}
-	return nil
 }
