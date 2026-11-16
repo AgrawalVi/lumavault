@@ -1,9 +1,28 @@
+export { create, type MessageInitShape } from "@bufbuild/protobuf";
+export {
+  timestampDate,
+  timestampFromDate,
+  timestampFromMs,
+  timestampMs,
+  timestampNow,
+  type FieldMask,
+  type Timestamp,
+} from "@bufbuild/protobuf/wkt";
 export {
   Code,
   ConnectError,
+  createClient,
   type CallOptions,
+  type Client,
+  type Interceptor,
   type Transport,
 } from "@connectrpc/connect";
+export {
+  createConnectTransport,
+  createGrpcWebTransport,
+  type ConnectTransportOptions,
+  type GrpcWebTransportOptions,
+} from "@connectrpc/connect-web";
 
 export * from "./gen/lumavault/v1/storage_pb.js";
 export * from "./constants.js";
@@ -12,7 +31,6 @@ export type * from "./types.js";
 export {
   Sha256,
   assertValidSha256Hex,
-  bytesToHex,
   isValidSha256Hex,
   sha256Hex,
   toBufferSource,

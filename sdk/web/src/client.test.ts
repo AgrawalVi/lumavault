@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 
-import { create } from "@bufbuild/protobuf";
-import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport } from "@connectrpc/connect";
 
 import {
+  Code,
+  ConnectError,
   EMPTY_SHA256_DIGEST,
   LumaVaultClient,
   LumaVaultDataPlaneError,
@@ -13,7 +14,10 @@ import {
   Namespace,
   ObjectMetadataSchema,
   StorageService,
+  create,
   getThumbnailUrl,
+  timestampDate,
+  timestampFromMs,
   type CommitObjectRequest,
   type ObjectMetadata,
   type UploadPhase,
@@ -45,21 +49,43 @@ function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
+function isSafeId(id: string): boolean {
+  return (
+    id.length > 0 &&
+    id !== "." &&
+    id !== ".." &&
+    !id.includes("/") &&
+    !id.includes("\\")
+  );
+}
+
 /**
  * In-memory fake LumaVault Gateway pairing a real `createRouterTransport` Connect-RPC router
  * with a mock HTTP Data Plane (`PUT/GET /v1/chunks/{sha256}` and `GET /v1/stream/{id}`).
  */
 function createFakeGateway(hooks?: {
-  onPutChunk?: (hash: string, body: Uint8Array, signal?: AbortSignal | null) => Promise<Response | void>;
+  onPutChunk?: (
+    hash: string,
+    body: Uint8Array,
+    signal?: AbortSignal | null,
+    headers?: Headers,
+  ) => Promise<Response | void>;
   includeStreamEtag?: boolean;
+  useBinaryFormat?: boolean;
+  repeatNextPageToken?: boolean;
 }) {
   const chunks = new Map<string, Uint8Array>();
   const objects = new Map<string, ObjectMetadata>();
   const dedupIndex = new Map<string, string>();
   let nextId = 1;
+  let fakeClockMs = 1_700_000_000_000;
 
   const stats = {
     hasChunksCalls: [] as string[][],
+    rpcAuthHeaders: [] as Array<string | null>,
+    putAuthHeaders: [] as Array<string | null>,
+    putContentTypes: [] as Array<string | null>,
+    streamAuthHeaders: [] as Array<string | null>,
     commitRequests: [] as CommitObjectRequest[],
     putChunkHashes: [] as string[],
     getObjectCalls: [] as string[],
@@ -70,135 +96,166 @@ function createFakeGateway(hooks?: {
     peakPuts: 0,
   };
 
-  const transport = createRouterTransport((router) => {
-    router.service(StorageService, {
-      hasChunks(req) {
-        stats.hasChunksCalls.push([...req.chunkHashes]);
-        const missingChunkHashes = req.chunkHashes.filter((h) => !chunks.has(h));
-        return { missingChunkHashes };
-      },
+  const transport = createRouterTransport(
+    (router) => {
+      router.service(StorageService, {
+        hasChunks(req, ctx) {
+          stats.rpcAuthHeaders.push(ctx.requestHeader.get("authorization"));
+          stats.hasChunksCalls.push([...req.chunkHashes]);
+          const missingChunkHashes = req.chunkHashes.filter((h) => !chunks.has(h));
+          return { missingChunkHashes };
+        },
 
-      commitObject(req) {
-        stats.commitRequests.push(req);
-        for (const h of req.chunkHashes) {
-          if (!chunks.has(h)) {
-            throw new ConnectError(`missing chunk ${h}`, Code.FailedPrecondition);
+        commitObject(req, ctx) {
+          stats.rpcAuthHeaders.push(ctx.requestHeader.get("authorization"));
+          stats.commitRequests.push(req);
+          for (const h of req.chunkHashes) {
+            if (!chunks.has(h)) {
+              throw new ConnectError(`missing chunk ${h}`, Code.FailedPrecondition);
+            }
           }
-        }
-        if (req.thumbnailChunkHash && !chunks.has(req.thumbnailChunkHash)) {
-          throw new ConnectError(
-            `missing thumbnail chunk ${req.thumbnailChunkHash}`,
-            Code.FailedPrecondition,
+          if (req.thumbnailChunkHash && !chunks.has(req.thumbnailChunkHash)) {
+            throw new ConnectError(
+              `missing thumbnail chunk ${req.thumbnailChunkHash}`,
+              Code.FailedPrecondition,
+            );
+          }
+
+          const key = `${req.namespace}:${req.sha256Digest}`;
+          if (!req.skipDedup) {
+            const existingId = dedupIndex.get(key);
+            const existing = existingId ? objects.get(existingId) : undefined;
+            if (existing) {
+              return { object: existing, deduplicated: true };
+            }
+          }
+
+          const id = `obj-${nextId++}`;
+          const nowTs = timestampFromMs((fakeClockMs += 1000));
+          const obj = create(ObjectMetadataSchema, {
+            id,
+            namespace: req.namespace,
+            filename: req.filename,
+            mimeType: req.mimeType,
+            sizeBytes: req.sizeBytes,
+            chunkSizeBytes: req.chunkSizeBytes,
+            sha256Digest: req.sha256Digest,
+            chunkHashes: [...req.chunkHashes],
+            thumbnailChunkHash: req.thumbnailChunkHash,
+            createdAt: nowTs,
+            updatedAt: nowTs,
+          });
+          objects.set(id, obj);
+          if (!req.skipDedup || !dedupIndex.has(key)) {
+            dedupIndex.set(key, id);
+          }
+          return { object: obj, deduplicated: false };
+        },
+
+        getObject(req) {
+          if (!isSafeId(req.objectId)) {
+            throw new ConnectError("invalid object_id", Code.InvalidArgument);
+          }
+          stats.getObjectCalls.push(req.objectId);
+          const obj = objects.get(req.objectId);
+          if (!obj) {
+            throw new ConnectError("not found", Code.NotFound);
+          }
+          return { object: obj };
+        },
+
+        listObjects(req) {
+          if (req.pageSize < 0) {
+            throw new ConnectError("negative page_size", Code.InvalidArgument);
+          }
+          stats.listObjectsCalls.push({
+            namespace: req.namespace,
+            pageSize: req.pageSize,
+            pageToken: req.pageToken,
+          });
+          const all = Array.from(objects.values()).filter(
+            (o) => o.namespace === req.namespace,
           );
-        }
-
-        const key = `${req.namespace}:${req.sha256Digest}`;
-        if (!req.skipDedup) {
-          const existingId = dedupIndex.get(key);
-          const existing = existingId ? objects.get(existingId) : undefined;
-          if (existing) {
-            return { object: existing, deduplicated: true };
+          const start = req.pageToken ? Number(req.pageToken) : 0;
+          const size = req.pageSize > 0 ? req.pageSize : 50;
+          const slice = all.slice(start, start + size);
+          if (hooks?.repeatNextPageToken) {
+            return { objects: slice, nextPageToken: "stuck-cursor" };
           }
-        }
+          const nextPageToken = start + size < all.length ? String(start + size) : "";
+          return { objects: slice, nextPageToken };
+        },
 
-        const id = `obj-${nextId++}`;
-        const obj = create(ObjectMetadataSchema, {
-          id,
-          namespace: req.namespace,
-          filename: req.filename,
-          mimeType: req.mimeType,
-          sizeBytes: req.sizeBytes,
-          chunkSizeBytes: req.chunkSizeBytes,
-          sha256Digest: req.sha256Digest,
-          chunkHashes: [...req.chunkHashes],
-          thumbnailChunkHash: req.thumbnailChunkHash,
-        });
-        objects.set(id, obj);
-        if (!req.skipDedup || !dedupIndex.has(key)) {
-          dedupIndex.set(key, id);
-        }
-        return { object: obj, deduplicated: false };
-      },
-
-      getObject(req) {
-        stats.getObjectCalls.push(req.objectId);
-        const obj = objects.get(req.objectId);
-        if (!obj) {
-          throw new ConnectError("not found", Code.NotFound);
-        }
-        return { object: obj };
-      },
-
-      listObjects(req) {
-        stats.listObjectsCalls.push({
-          namespace: req.namespace,
-          pageSize: req.pageSize,
-          pageToken: req.pageToken,
-        });
-        const all = Array.from(objects.values()).filter(
-          (o) => o.namespace === req.namespace,
-        );
-        const start = req.pageToken ? Number(req.pageToken) : 0;
-        const size = req.pageSize > 0 ? req.pageSize : 50;
-        const slice = all.slice(start, start + size);
-        const nextPageToken = start + size < all.length ? String(start + size) : "";
-        return { objects: slice, nextPageToken };
-      },
-
-      updateObjectMetadata(req) {
-        const id = req.object?.id ?? "";
-        const existing = objects.get(id);
-        if (!existing) {
-          throw new ConnectError("not found", Code.NotFound);
-        }
-        const paths = [...(req.updateMask?.paths ?? [])];
-        if (paths.length === 0) {
-          throw new ConnectError("empty update_mask", Code.InvalidArgument);
-        }
-        const updated = create(ObjectMetadataSchema, {
-          ...existing,
-          chunkHashes: [...existing.chunkHashes],
-        });
-        for (const path of paths) {
-          if (path === "filename") {
-            updated.filename = req.object?.filename ?? "";
-          } else if (path === "mime_type") {
-            updated.mimeType = req.object?.mimeType ?? "";
-          } else if (path === "thumbnail_chunk_hash") {
-            updated.thumbnailChunkHash = req.object?.thumbnailChunkHash ?? "";
-          } else {
-            throw new ConnectError(`unsupported path ${path}`, Code.InvalidArgument);
+        updateObjectMetadata(req) {
+          const id = req.object?.id ?? "";
+          if (!isSafeId(id)) {
+            throw new ConnectError("invalid object.id", Code.InvalidArgument);
           }
-        }
-        objects.set(id, updated);
-        stats.updateRequests.push({ id, paths, object: updated });
-        return { object: updated };
-      },
+          const existing = objects.get(id);
+          if (!existing) {
+            throw new ConnectError("not found", Code.NotFound);
+          }
+          const paths = [...(req.updateMask?.paths ?? [])];
+          if (paths.length === 0) {
+            throw new ConnectError("empty update_mask", Code.InvalidArgument);
+          }
+          const updated = create(ObjectMetadataSchema, {
+            ...existing,
+            chunkHashes: [...existing.chunkHashes],
+            updatedAt: timestampFromMs((fakeClockMs += 1000)),
+          });
+          for (const path of paths) {
+            if (path === "filename") {
+              updated.filename = req.object?.filename ?? "";
+            } else if (path === "mime_type") {
+              updated.mimeType = req.object?.mimeType ?? "";
+            } else if (path === "thumbnail_chunk_hash") {
+              updated.thumbnailChunkHash = req.object?.thumbnailChunkHash ?? "";
+            } else {
+              throw new ConnectError(`unsupported path ${path}`, Code.InvalidArgument);
+            }
+          }
+          objects.set(id, updated);
+          stats.updateRequests.push({ id, paths, object: updated });
+          return { object: updated };
+        },
 
-      deleteObject(req) {
-        stats.deleteCalls.push(req.objectId);
-        if (!objects.delete(req.objectId)) {
-          throw new ConnectError("not found", Code.NotFound);
-        }
-        return {};
+        deleteObject(req) {
+          if (!isSafeId(req.objectId)) {
+            throw new ConnectError("invalid object_id", Code.InvalidArgument);
+          }
+          stats.deleteCalls.push(req.objectId);
+          if (!objects.delete(req.objectId)) {
+            throw new ConnectError("not found", Code.NotFound);
+          }
+          return {};
+        },
+      });
+    },
+    {
+      transport: {
+        useBinaryFormat: hooks?.useBinaryFormat ?? false,
       },
-    });
-  });
+    },
+  );
 
   const mockFetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     const method = (init?.method ?? "GET").toUpperCase();
+    const reqHeaders = new Headers(init?.headers);
 
     if (url.pathname.startsWith("/v1/chunks/")) {
       const hash = url.pathname.slice("/v1/chunks/".length);
       if (method === "PUT") {
         stats.activePuts++;
         stats.peakPuts = Math.max(stats.peakPuts, stats.activePuts);
+        stats.putAuthHeaders.push(reqHeaders.get("authorization"));
+        stats.putContentTypes.push(reqHeaders.get("content-type"));
         try {
           init?.signal?.throwIfAborted();
           const body = new Uint8Array(await new Response(init?.body).arrayBuffer());
           if (hooks?.onPutChunk) {
-            const custom = await hooks.onPutChunk(hash, body, init?.signal);
+            const custom = await hooks.onPutChunk(hash, body, init?.signal, reqHeaders);
             if (custom) {
               return custom;
             }
@@ -234,6 +291,7 @@ function createFakeGateway(hooks?: {
     }
 
     if (url.pathname.startsWith("/v1/stream/") && method === "GET") {
+      stats.streamAuthHeaders.push(reqHeaders.get("authorization"));
       const objectId = decodeURIComponent(url.pathname.slice("/v1/stream/".length));
       const obj = objects.get(objectId);
       if (!obj) {
@@ -263,11 +321,15 @@ function createFakeGateway(hooks?: {
 }
 
 describe("LumaVaultClient setup and URL helpers", () => {
-  it("normalizes baseUrl and builds stream, chunk, and nullable thumbnail URLs", async () => {
-    const { client } = createFakeGateway();
+  it("normalizes baseUrl, validates objectIds, and builds stream, chunk, and nullable thumbnail URLs", async () => {
+    const { client, stats } = createFakeGateway();
     assert.equal(client.baseUrl, "http://localhost:8080");
     assert.equal(
       client.getStreamUrl("obj-42"),
+      "http://localhost:8080/v1/stream/obj-42",
+    );
+    assert.equal(
+      client.getStreamUrl({ id: "obj-42" }),
       "http://localhost:8080/v1/stream/obj-42",
     );
     assert.equal(
@@ -278,11 +340,37 @@ describe("LumaVaultClient setup and URL helpers", () => {
     assert.equal(client.getThumbnailUrl(null), null);
     assert.equal(client.getThumbnailUrl(""), null);
     assert.equal(client.getThumbnailUrl({ thumbnailChunkHash: "" }), null);
+    assert.equal(client.getThumbnailUrl({ thumbnailChunkHash: null }), null);
     assert.equal(getThumbnailUrl("http://localhost:8080/", { thumbnailChunkHash: "" }), null);
     assert.equal(
       client.getThumbnailUrl({ thumbnailChunkHash: EMPTY_SHA256_DIGEST }),
       `http://localhost:8080/v1/chunks/${EMPTY_SHA256_DIGEST}`,
     );
+
+    const sameOriginClient = new LumaVaultClient({
+      baseUrl: "/",
+      transport: createFakeGateway().transport,
+    });
+    assert.equal(sameOriginClient.baseUrl, "/");
+    assert.equal(sameOriginClient.getStreamUrl("obj-42"), "/v1/stream/obj-42");
+    assert.equal(
+      sameOriginClient.getThumbnailUrl(EMPTY_SHA256_DIGEST),
+      `/v1/chunks/${EMPTY_SHA256_DIGEST}`,
+    );
+
+    // Unsafe objectIds (matching engine.go:isSafeObjectID) fail locally across all helpers.
+    for (const badId of ["", ".", "..", "a/b", "a\\b"]) {
+      assert.throws(() => client.getStreamUrl(badId), RangeError);
+      await assert.rejects(() => client.getObject(badId), RangeError);
+      await assert.rejects(
+        () => client.updateObjectMetadata(badId, { filename: "x" }),
+        RangeError,
+      );
+      await assert.rejects(() => client.deleteObject(badId), RangeError);
+      await assert.rejects(() => client.downloadObject(badId), RangeError);
+    }
+    assert.equal(stats.getObjectCalls.length, 0);
+    assert.equal(stats.deleteCalls.length, 0);
 
     // Verify default createConnectTransport path respects custom fetch and useBinaryFormat.
     let seenUrl = "";
@@ -307,56 +395,67 @@ describe("LumaVaultClient setup and URL helpers", () => {
 });
 
 describe("LumaVaultClient.uploadObject", () => {
-  it("uploads a multi-chunk File with bounded concurrency=2, File metadata inference, and 4-phase progress", async () => {
-    const { client, stats } = createFakeGateway();
+  it("uploads a multi-chunk File over JSON & binary wire formats with bounded concurrency=2 and 4-phase progress", async () => {
+    for (const useBinaryFormat of [false, true]) {
+      const { client, stats } = createFakeGateway({ useBinaryFormat });
 
-    const c0 = makeBytes(MIN_CHUNK_SIZE_BYTES, 10);
-    const c1 = makeBytes(MIN_CHUNK_SIZE_BYTES, 20);
-    const c2 = makeBytes(MIN_CHUNK_SIZE_BYTES, 30);
-    const c3 = makeBytes(MIN_CHUNK_SIZE_BYTES, 40);
-    const c4 = makeBytes(512 * 1024, 50);
-    const fullBytes = concatBytes([c0, c1, c2, c3, c4]);
-    const file = new File([fullBytes as Uint8Array<ArrayBuffer>], "clip.mov", {
-      type: "video/quicktime",
-    });
+      const c0 = makeBytes(MIN_CHUNK_SIZE_BYTES, 10);
+      const c1 = makeBytes(MIN_CHUNK_SIZE_BYTES, 20);
+      const c2 = makeBytes(MIN_CHUNK_SIZE_BYTES, 30);
+      const c3 = makeBytes(MIN_CHUNK_SIZE_BYTES, 40);
+      const c4 = makeBytes(512 * 1024, 50);
+      const fullBytes = concatBytes([c0, c1, c2, c3, c4]);
+      const file = new File([fullBytes as Uint8Array<ArrayBuffer>], "clip.mov", {
+        type: "video/quicktime",
+      });
 
-    const events: UploadProgress[] = [];
-    const res = await client.uploadObject(file, {
-      namespace: Namespace.PHOTOS,
-      onProgress: (p) => events.push({ ...p }),
-    });
+      const events: UploadProgress[] = [];
+      const res = await client.uploadObject(file, {
+        namespace: Namespace.PHOTOS,
+        headers: { Authorization: "Bearer secret-token" },
+        onProgress: (p) => events.push({ ...p }),
+      });
 
-    assert.equal(stats.peakPuts, 2);
-    assert.equal(stats.putChunkHashes.length, 5);
-    assert.equal(res.deduplicated, false);
-    assert.equal(res.uploadedChunks, 5);
-    assert.equal(res.skippedChunks, 0);
-    assert.equal(res.object.filename, "clip.mov");
-    assert.equal(res.object.mimeType, "video/quicktime");
-    assert.equal(res.object.sizeBytes, BigInt(fullBytes.byteLength));
-    assert.equal(res.object.chunkSizeBytes, MIN_CHUNK_SIZE_BYTES);
-    assert.equal(res.object.sha256Digest, nodeSha256(fullBytes));
-    assert.deepEqual(res.object.chunkHashes, [
-      nodeSha256(c0),
-      nodeSha256(c1),
-      nodeSha256(c2),
-      nodeSha256(c3),
-      nodeSha256(c4),
-    ]);
+      assert.equal(stats.peakPuts, 2);
+      assert.equal(stats.putChunkHashes.length, 5);
+      assert.deepEqual(stats.rpcAuthHeaders, [
+        "Bearer secret-token",
+        "Bearer secret-token",
+      ]);
+      assert.deepEqual(stats.putAuthHeaders, Array(5).fill("Bearer secret-token"));
+      assert.deepEqual(stats.putContentTypes, Array(5).fill("application/octet-stream"));
+      assert.equal(res.deduplicated, false);
+      assert.equal(res.uploadedChunks, 5);
+      assert.equal(res.skippedChunks, 0);
+      assert.equal(res.object.filename, "clip.mov");
+      assert.equal(res.object.mimeType, "video/quicktime");
+      assert.equal(res.object.sizeBytes, BigInt(fullBytes.byteLength));
+      assert.equal(res.object.chunkSizeBytes, MIN_CHUNK_SIZE_BYTES);
+      assert.equal(res.object.sha256Digest, nodeSha256(fullBytes));
+      assert.ok(res.object.createdAt !== undefined);
+      assert.ok(timestampDate(res.object.createdAt) instanceof Date);
+      assert.deepEqual(res.object.chunkHashes, [
+        nodeSha256(c0),
+        nodeSha256(c1),
+        nodeSha256(c2),
+        nodeSha256(c3),
+        nodeSha256(c4),
+      ]);
 
-    const distinctPhases = events.reduce<UploadPhase[]>((acc, e) => {
-      if (acc[acc.length - 1] !== e.phase) {
-        acc.push(e.phase);
-      }
-      return acc;
-    }, []);
-    assert.deepEqual(distinctPhases, ["hashing", "checking", "uploading", "committing"]);
-    const lastEvent = events[events.length - 1]!;
-    assert.equal(lastEvent.phase, "committing");
-    assert.equal(lastEvent.uploadedChunks, 5);
-    assert.equal(lastEvent.totalMissingChunks, 5);
-    assert.equal(lastEvent.uploadedBytes, fullBytes.byteLength);
-    assert.equal(lastEvent.totalUploadBytes, fullBytes.byteLength);
+      const distinctPhases = events.reduce<UploadPhase[]>((acc, e) => {
+        if (acc[acc.length - 1] !== e.phase) {
+          acc.push(e.phase);
+        }
+        return acc;
+      }, []);
+      assert.deepEqual(distinctPhases, ["hashing", "checking", "uploading", "committing"]);
+      const lastEvent = events[events.length - 1]!;
+      assert.equal(lastEvent.phase, "committing");
+      assert.equal(lastEvent.uploadedChunks, 5);
+      assert.equal(lastEvent.totalMissingChunks, 5);
+      assert.equal(lastEvent.uploadedBytes, fullBytes.byteLength);
+      assert.equal(lastEvent.totalUploadBytes, fullBytes.byteLength);
+    }
   });
 
   it("handles partial deduplication (1 of 4 chunks missing) and 100% deduplication", async () => {
@@ -414,7 +513,7 @@ describe("LumaVaultClient.uploadObject", () => {
     const payload = concatBytes([chunkA, chunkB, chunkA, chunkA]);
     const res = await client.uploadObject(payload, {
       namespace: Namespace.PHOTOS,
-      filename: " burst.raw ",
+      filename: "burst.raw",
     });
 
     assert.deepEqual(stats.hasChunksCalls, [[hashA, hashB]]);
@@ -553,11 +652,60 @@ describe("LumaVaultClient.uploadObject", () => {
     assert.equal(startedChunks, 2); // Chunk 2 was never started after failure!
     assert.equal(stats.commitRequests.length, 0);
   });
+
+  it("propagates caller AbortSignal to all in-flight chunk PUTs without post-abort progress events", async () => {
+    const c0 = makeBytes(MIN_CHUNK_SIZE_BYTES, 11);
+    const c1 = makeBytes(MIN_CHUNK_SIZE_BYTES, 22);
+    const c2 = makeBytes(MIN_CHUNK_SIZE_BYTES, 33);
+
+    const callerController = new AbortController();
+    let inFlight = 0;
+    let abortedWorkers = 0;
+    let postAbortProgress = 0;
+
+    const { client, stats } = createFakeGateway({
+      async onPutChunk(_hash, _body, signal) {
+        inFlight++;
+        if (inFlight === 2) {
+          queueMicrotask(() => callerController.abort(new Error("user-cancelled-upload")));
+        }
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              abortedWorkers++;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        client.uploadObject(concatBytes([c0, c1, c2]), {
+          namespace: Namespace.PHOTOS,
+          concurrency: 2,
+          signal: callerController.signal,
+          onProgress: () => {
+            if (callerController.signal.aborted) {
+              postAbortProgress++;
+            }
+          },
+        }),
+      /user-cancelled-upload/,
+    );
+
+    assert.equal(abortedWorkers, 2);
+    assert.equal(postAbortProgress, 0);
+    assert.equal(stats.commitRequests.length, 0);
+  });
 });
 
 describe("Control plane helpers, FieldMask updates, pagination, and verified downloads", () => {
   it("builds FieldMask paths automatically in updateObjectMetadata and rejects empty/invalid updates client-side", async () => {
-    const { client, chunks, stats } = createFakeGateway();
+    const { client, chunks, stats } = createFakeGateway({ useBinaryFormat: false });
 
     const created = await client.uploadObject(makeBytes(1024, 9), {
       namespace: Namespace.PHOTOS,
@@ -565,10 +713,24 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
       mimeType: "image/jpeg",
     });
 
-    // Empty updates fail locally before hitting the RPC layer.
+    // Empty, non-string, and invalid-hash updates fail locally before hitting the RPC layer.
     await assert.rejects(
       () => client.updateObjectMetadata(created.object.id, {}),
       RangeError,
+    );
+    await assert.rejects(
+      () =>
+        client.updateObjectMetadata(created.object.id, {
+          filename: null as unknown as string,
+        }),
+      TypeError,
+    );
+    await assert.rejects(
+      () =>
+        client.updateObjectMetadata(created.object.id, {
+          mimeType: 123 as unknown as string,
+        }),
+      TypeError,
     );
     await assert.rejects(
       () =>
@@ -577,17 +739,28 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
         }),
       RangeError,
     );
+    await assert.rejects(
+      () =>
+        client.commitObject({
+          namespace: Namespace.PHOTOS,
+          sizeBytes: 10n,
+          chunkSizeBytes: MIN_CHUNK_SIZE_BYTES,
+          sha256Digest: EMPTY_SHA256_DIGEST,
+          chunkHashes: [],
+        }),
+      RangeError,
+    );
     assert.equal(stats.updateRequests.length, 0);
 
-    // Single-field update.
-    const renamed = await client.updateObjectMetadata(created.object.id, {
-      filename: "after.jpg",
+    // Single-field update (including clearing filename to "" while preserving mimeType).
+    const clearedName = await client.updateObjectMetadata(created.object.id, {
+      filename: "",
     });
-    assert.equal(renamed.filename, "after.jpg");
-    assert.equal(renamed.mimeType, "image/jpeg");
+    assert.equal(clearedName.filename, "");
+    assert.equal(clearedName.mimeType, "image/jpeg");
     assert.deepEqual(stats.updateRequests[0]!.paths, ["filename"]);
 
-    // Multi-field update including thumbnailChunkHash, then clearing thumbnailChunkHash with "".
+    // Multi-field update over JSON FieldMask ("filename,mimeType,thumbnailChunkHash"), then clearing thumbnailChunkHash.
     const thumbBytes = makeBytes(512, 88);
     const thumbHash = nodeSha256(thumbBytes);
     chunks.set(thumbHash, thumbBytes);
@@ -613,8 +786,11 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
     assert.deepEqual(stats.updateRequests[2]!.paths, ["thumbnail_chunk_hash"]);
   });
 
-  it("paginates cleanly across multiple pages with listAllObjects and supports getObject / deleteObject", async () => {
+  it("paginates cleanly across multiple pages with listAllObjects, supports early break/abort, and guards repeating tokens", async () => {
     const { client, stats } = createFakeGateway();
+
+    await assert.rejects(() => client.listObjects({ namespace: Namespace.CINEMA, pageSize: -1 }), RangeError);
+    await assert.rejects(() => client.listObjects({ namespace: Namespace.CINEMA, pageSize: Number.NaN }), RangeError);
 
     const ids: string[] = [];
     for (let i = 0; i < 5; i++) {
@@ -624,7 +800,6 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
       });
       ids.push(res.object.id);
     }
-    // Upload one object in a different namespace to confirm isolation.
     await client.uploadObject(makeBytes(128, 999), {
       namespace: Namespace.PHOTOS,
       filename: "other.jpg",
@@ -634,9 +809,38 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
     for await (const obj of client.listAllObjects(Namespace.CINEMA, { pageSize: 2 })) {
       listedIds.push(obj.id);
     }
-
     assert.deepEqual(listedIds, ids);
     assert.equal(stats.listObjectsCalls.length, 3); // Pages: [0..1], [2..3], [4]
+
+    // Early consumer break fetches only the first page.
+    stats.listObjectsCalls.length = 0;
+    for await (const _obj of client.listAllObjects(Namespace.CINEMA, { pageSize: 2 })) {
+      break;
+    }
+    assert.equal(stats.listObjectsCalls.length, 1);
+
+    // Mid-page AbortSignal stops yielding immediately.
+    const abortCtrl = new AbortController();
+    const yieldedBeforeAbort: string[] = [];
+    await assert.rejects(async () => {
+      for await (const obj of client.listAllObjects(Namespace.CINEMA, {
+        pageSize: 4,
+        signal: abortCtrl.signal,
+      })) {
+        yieldedBeforeAbort.push(obj.id);
+        abortCtrl.abort(new Error("stop-listing"));
+      }
+    }, /stop-listing/);
+    assert.equal(yieldedBeforeAbort.length, 1);
+
+    // Repeating nextPageToken cycle guard.
+    const stuckGw = createFakeGateway({ repeatNextPageToken: true });
+    await stuckGw.client.uploadObject(makeBytes(64, 1), { namespace: Namespace.CINEMA });
+    await assert.rejects(async () => {
+      for await (const _obj of stuckGw.client.listAllObjects(Namespace.CINEMA, { pageSize: 1 })) {
+        // Drain until stuck cursor throws.
+      }
+    }, /repeating nextPageToken/);
 
     const fetched = await client.getObject(ids[0]!);
     assert.equal(fetched.filename, "ep-1.mkv");
@@ -648,24 +852,28 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
     );
   });
 
-  it("verifies downloadObject via ObjectMetadata (without ETag) and via objectId + strong ETag with zero GetObject RPCs", async () => {
+  it("verifies downloadObject via ObjectMetadata, partial ObjectMetadata, and objectId + strong ETag with zero GetObject RPCs", async () => {
     const payload = concatBytes([
       makeBytes(MIN_CHUNK_SIZE_BYTES, 501),
       makeBytes(128 * 1024, 502),
     ]);
 
-    // 1. Via ObjectMetadata even when response omits ETag.
+    // 1. Via ObjectMetadata even when response omits ETag (and with expectedSha256: undefined).
     const noEtagGw = createFakeGateway({ includeStreamEtag: false });
     const uploadedNoEtag = await noEtagGw.client.uploadObject(payload, {
       namespace: Namespace.GAMES,
       filename: "zelda.gba",
     });
 
-    const bytesFromMeta = await noEtagGw.client.downloadObject(uploadedNoEtag.object);
+    const bytesFromMeta = await noEtagGw.client.downloadObject(uploadedNoEtag.object, {
+      expectedSha256: undefined,
+      headers: { Authorization: "Bearer dl-token" },
+    });
     assert.deepEqual(bytesFromMeta, payload);
+    assert.deepEqual(noEtagGw.stats.streamAuthHeaders, ["Bearer dl-token"]);
     assert.equal(noEtagGw.stats.getObjectCalls.length, 0);
 
-    // 2. Via objectId string using quote-stripped strong ETag header.
+    // 2. Via objectId string AND via partial ObjectMetadata (sha256Digest: "") falling back to strong ETag.
     const withEtagGw = createFakeGateway({ includeStreamEtag: true });
     const uploadedWithEtag = await withEtagGw.client.uploadObject(payload, {
       namespace: Namespace.GAMES,
@@ -674,6 +882,11 @@ describe("Control plane helpers, FieldMask updates, pagination, and verified dow
 
     const bytesFromId = await withEtagGw.client.downloadObject(uploadedWithEtag.object.id);
     assert.deepEqual(bytesFromId, payload);
+
+    const partialMeta = create(ObjectMetadataSchema, { id: uploadedWithEtag.object.id });
+    assert.equal(partialMeta.sha256Digest, "");
+    const bytesFromPartialMeta = await withEtagGw.client.downloadObject(partialMeta);
+    assert.deepEqual(bytesFromPartialMeta, payload);
     assert.equal(withEtagGw.stats.getObjectCalls.length, 0);
   });
 });
