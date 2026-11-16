@@ -1,113 +1,33 @@
 import {
+  DEFAULT_MAX_DOWNLOAD_BYTES,
   MAX_CHUNK_SIZE_BYTES,
-  isValidSha256Hex,
-  sha256Hex,
-  toBufferSource,
-} from "./chunker.js";
+} from "./constants.js";
+import { LumaVaultDataPlaneError } from "./errors.js";
+import { isValidSha256Hex, sha256Hex, toBufferSource } from "./sha256.js";
+import type {
+  DownloadStreamOptions,
+  GetChunkOptions,
+  PutChunkOptions,
+  PutChunkResult,
+} from "./types.js";
+import {
+  assertValidDataPlaneHash,
+  getChunkUrl,
+  getStreamUrl,
+} from "./urls.js";
 
-/** Default maximum in-memory download size (256 MiB) enforced by `downloadStream`. */
-export const DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
-
-export type DataPlaneErrorCode =
-  | "INVALID_HASH"
-  | "HASH_MISMATCH"
-  | "PAYLOAD_TOO_LARGE"
-  | "NOT_FOUND"
-  | "HTTP_ERROR";
-
-export interface LumaVaultDataPlaneErrorOptions {
-  status?: number;
-  cause?: unknown;
-}
-
-/** Structured error thrown by LumaVault HTTP Data Plane operations. */
-export class LumaVaultDataPlaneError extends Error {
-  readonly code: DataPlaneErrorCode;
-  readonly status?: number;
-
-  constructor(
-    code: DataPlaneErrorCode,
-    message: string,
-    options?: LumaVaultDataPlaneErrorOptions,
-  ) {
-    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
-    this.name = "LumaVaultDataPlaneError";
-    this.code = code;
-    if (options?.status !== undefined) {
-      this.status = options.status;
-    }
-  }
-}
-
-export interface DataPlaneRequestOptions {
-  fetch?: typeof globalThis.fetch;
-  signal?: AbortSignal;
-}
-
-export interface PutChunkOptions extends DataPlaneRequestOptions {
-  /** Re-hashes `data` locally before uploading to verify it matches `sha256` (default: `false`). */
-  verifyLocalHash?: boolean;
-}
-
-export interface PutChunkResult {
-  readonly sha256: string;
-  readonly sizeBytes: number;
-}
-
-export interface GetChunkOptions extends DataPlaneRequestOptions {
-  /** Verifies that downloaded bytes hash to `sha256` (default: `true`). */
-  verify?: boolean;
-}
-
-export interface DownloadStreamOptions extends DataPlaneRequestOptions {
-  /** Expected whole-object SHA-256 digest; falls back to quote-stripped strong `ETag` if omitted. */
-  expectedSha256?: string;
-  /** Maximum bytes buffered in memory before aborting with `PAYLOAD_TOO_LARGE` (default: 256 MiB). */
-  maxBytes?: number;
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  if (typeof baseUrl !== "string" || baseUrl.trim().length === 0) {
-    throw new TypeError("baseUrl must be a non-empty string");
-  }
-  return baseUrl.trim().replace(/\/+$/, "");
-}
-
-function assertValidHashOrThrow(sha256: string, label = "sha256"): void {
-  if (!isValidSha256Hex(sha256)) {
-    throw new LumaVaultDataPlaneError(
-      "INVALID_HASH",
-      `Invalid ${label}: expected 64-character lowercase hex SHA-256 digest, got "${String(sha256)}"`,
-    );
-  }
-}
-
-/**
- * Builds the content-addressed chunk URL (`{baseUrl}/v1/chunks/{sha256}`), suitable for
- * raw chunk `PUT`/`GET` requests and immutable cached `<img>` thumbnails.
- */
-export function getChunkUrl(baseUrl: string, sha256: string): string {
-  const root = normalizeBaseUrl(baseUrl);
-  assertValidHashOrThrow(sha256, "chunk sha256");
-  return `${root}/v1/chunks/${sha256}`;
-}
-
-/**
- * Builds the byte-range media stream URL (`{baseUrl}/v1/stream/{objectId}`), suitable for
- * HTML5 `<video>` / `<audio>` `HTTP 206 Partial Content` playback and full-object downloads.
- */
-export function getStreamUrl(baseUrl: string, objectId: string): string {
-  const root = normalizeBaseUrl(baseUrl);
-  if (
-    typeof objectId !== "string" ||
-    objectId.length === 0 ||
-    objectId === "." ||
-    objectId === ".."
-  ) {
-    throw new RangeError(`Invalid objectId: "${String(objectId)}"`);
-  }
-  return `${root}/v1/stream/${encodeURIComponent(objectId)}`;
-}
+export { DEFAULT_MAX_DOWNLOAD_BYTES } from "./constants.js";
+export { LumaVaultDataPlaneError } from "./errors.js";
+export type {
+  DataPlaneErrorCode,
+  DataPlaneRequestOptions,
+  DownloadStreamOptions,
+  GetChunkOptions,
+  LumaVaultDataPlaneErrorOptions,
+  PutChunkOptions,
+  PutChunkResult,
+} from "./types.js";
+export { getChunkUrl, getStreamUrl, normalizeBaseUrl } from "./urls.js";
 
 async function readErrorText(response: Response): Promise<string> {
   try {
@@ -396,7 +316,7 @@ export async function downloadStream(
     throw new RangeError(`maxBytes must be a non-negative safe integer, got ${String(maxBytes)}`);
   }
   if (expectedSha256 !== undefined) {
-    assertValidHashOrThrow(expectedSha256, "expectedSha256");
+    assertValidDataPlaneHash(expectedSha256, "expectedSha256");
   }
   signal?.throwIfAborted();
 

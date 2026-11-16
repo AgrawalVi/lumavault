@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "node -e \"fs.rmSync('.build/test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --enable-source-maps --test .build/test"
   },

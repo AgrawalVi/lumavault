@@ -3,20 +3,18 @@ import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 
 import {
+  assertValidChunkSize,
+  defaultChunkSizeForNamespace,
+  isValidChunkSize,
+  prepareChunkPlan,
+} from "./chunker.js";
+import {
   CINEMA_CHUNK_SIZE_BYTES,
   DEFAULT_CHUNK_SIZE_BYTES,
   EMPTY_SHA256_DIGEST,
   MAX_CHUNK_SIZE_BYTES,
   MIN_CHUNK_SIZE_BYTES,
-  Sha256,
-  assertValidChunkSize,
-  assertValidSha256Hex,
-  defaultChunkSizeForNamespace,
-  isValidChunkSize,
-  isValidSha256Hex,
-  prepareChunkPlan,
-  sha256Hex,
-} from "./chunker.js";
+} from "./constants.js";
 import { Namespace } from "./gen/lumavault/v1/storage_pb.js";
 
 function nodeSha256(bytes: Uint8Array): string {
@@ -46,7 +44,7 @@ describe("chunker constants and validators", () => {
     assert.throws(() => defaultChunkSizeForNamespace(Namespace.UNSPECIFIED), RangeError);
   });
 
-  it("validates chunk sizes and 64-char lowercase hex SHA-256 digests", () => {
+  it("validates chunk sizes within [4 MiB, 64 MiB]", () => {
     assert.equal(isValidChunkSize(MIN_CHUNK_SIZE_BYTES), true);
     assert.equal(isValidChunkSize(16 * 1024 * 1024), true);
     assert.equal(isValidChunkSize(MAX_CHUNK_SIZE_BYTES), true);
@@ -54,47 +52,6 @@ describe("chunker constants and validators", () => {
     assert.equal(isValidChunkSize(MAX_CHUNK_SIZE_BYTES + 1), false);
     assert.equal(isValidChunkSize(MIN_CHUNK_SIZE_BYTES + 0.5), false);
     assert.throws(() => assertValidChunkSize(1024), RangeError);
-
-    assert.equal(isValidSha256Hex(EMPTY_SHA256_DIGEST), true);
-    assert.equal(isValidSha256Hex(EMPTY_SHA256_DIGEST.toUpperCase()), false);
-    assert.equal(isValidSha256Hex(EMPTY_SHA256_DIGEST.slice(0, 63)), false);
-    assert.equal(isValidSha256Hex(`${EMPTY_SHA256_DIGEST}0`), false);
-    assert.equal(isValidSha256Hex("g".repeat(64)), false);
-    assert.throws(() => assertValidSha256Hex("bad-hash"), RangeError);
-  });
-});
-
-describe("Sha256 incremental hasher", () => {
-  it("matches NIST FIPS 180-4 test vectors and streaming block boundaries", () => {
-    const enc = new TextEncoder();
-
-    assert.equal(new Sha256().digestHex(), EMPTY_SHA256_DIGEST);
-    assert.equal(
-      new Sha256().update(enc.encode("abc")).digestHex(),
-      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-    );
-    assert.equal(
-      new Sha256()
-        .update(enc.encode("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))
-        .digestHex(),
-      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
-    );
-
-    // Exercise 55, 56, 63, 64, 65, and 513-byte padding boundaries across irregular update sizes.
-    for (const length of [1, 55, 56, 63, 64, 65, 128, 513, 4099]) {
-      const payload = deterministicBytes(length, length);
-      const expected = nodeSha256(payload);
-
-      for (const step of [1, 7, 64, 131]) {
-        const hasher = new Sha256();
-        for (let offset = 0; offset < payload.byteLength; offset += step) {
-          hasher.update(payload.subarray(offset, Math.min(offset + step, payload.byteLength)));
-        }
-        assert.equal(hasher.digestHex(), expected, `length=${length} step=${step}`);
-        // Calling digestHex() a second time must remain idempotent.
-        assert.equal(hasher.digestHex(), expected);
-      }
-    }
   });
 });
 
@@ -155,8 +112,6 @@ describe("prepareChunkPlan", () => {
 
     const view = new Uint8Array(backing.buffer, 137, innerPayload.byteLength);
     const expected = nodeSha256(innerPayload);
-
-    assert.equal(await sha256Hex(view), expected);
 
     const plan = await prepareChunkPlan(view);
     assert.equal(plan.sizeBytes, innerPayload.byteLength);

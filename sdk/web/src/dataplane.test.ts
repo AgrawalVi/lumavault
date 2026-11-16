@@ -2,15 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 
-import { EMPTY_SHA256_DIGEST, MAX_CHUNK_SIZE_BYTES } from "./chunker.js";
+import { EMPTY_SHA256_DIGEST, MAX_CHUNK_SIZE_BYTES } from "./constants.js";
 import {
-  LumaVaultDataPlaneError,
   downloadStream,
   getChunk,
-  getChunkUrl,
-  getStreamUrl,
   putChunk,
 } from "./dataplane.js";
+import { LumaVaultDataPlaneError } from "./errors.js";
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -28,28 +26,6 @@ function streamFromChunks(parts: Uint8Array[]): ReadableStream<Uint8Array> {
     },
   });
 }
-
-describe("URL builders", () => {
-  it("normalizes trailing slashes on baseUrl and encodes objectId", () => {
-    assert.equal(
-      getChunkUrl("http://localhost:8080///", EMPTY_SHA256_DIGEST),
-      `http://localhost:8080/v1/chunks/${EMPTY_SHA256_DIGEST}`,
-    );
-    assert.equal(
-      getStreamUrl("http://localhost:8080/", "movie/4k hdr #1?.mkv"),
-      "http://localhost:8080/v1/stream/movie%2F4k%20hdr%20%231%3F.mkv",
-    );
-
-    assert.throws(
-      () => getChunkUrl("http://localhost:8080", "NOT_HEX"),
-      (err: unknown) =>
-        err instanceof LumaVaultDataPlaneError && err.code === "INVALID_HASH",
-    );
-    assert.throws(() => getStreamUrl("http://localhost:8080", ""), RangeError);
-    assert.throws(() => getStreamUrl("http://localhost:8080", ".."), RangeError);
-    assert.throws(() => getStreamUrl("   ", "obj-1"), TypeError);
-  });
-});
 
 describe("putChunk", () => {
   it("uploads exact Uint8Array subarray bytes with application/octet-stream", async () => {
