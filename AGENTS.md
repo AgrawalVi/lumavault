@@ -2,20 +2,24 @@
 
 Always read [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the full architecture and system design.
 
-## 1. Multi-Worktree Ownership & Linear Scoping Rules
+## 1. Worktrees, Ownership & Linear Docs
 
-Each AI agent conversation works in an isolated **git worktree** mapped to a specific **Linear Issue** in the **Lumavault (`LUM`)** team.
-- **Milestone Scoping & Review Workflow (Never create Linear issues directly):**
-  1. **Draft the Linear Issue Plan Artifact & Publish to Linear:** Write the initial proposed Linear issues (titles, descriptions, owned paths, dependencies, and acceptance criteria) to a dedicated Markdown artifact (e.g., `mX_linear_scope.md`) and publish it to Linear (`save_document`) under the target project (`P-LUM-1`–`P-LUM-6`).
-  2. **Initial User Review:** The user reviews the initial plan artifact / Linear document and gives the go-ahead for deeper review.
-  3. **Subagent Architecture & Quality Audit (Inline `[AGENT]` Comments, One per Finding):** Launch review subagents (e.g., `/improve-codebase-architecture` and `/ponytail-audit`) on the scoping document. **Instead of creating a separate review findings document or a single bundled comment**, post **one individual `[AGENT]` comment per finding** on the Linear scoping document via `save_comment(documentId, body)`, quoting the exact anchored line/deliverable from the plan alongside the issue found and plan update.
-  4. **User Verdicts & Plan Updates:** Walk through or apply the review findings on the scoping document, updating both the Linear scoping document (`save_document`) and the local artifact (`mX_linear_scope.md`), and create the issues in Linear (`save_issue`) upon final user approval.
-- **Linear Document Review & Threaded Comment Workflow (`[AGENT]` Prefix):**
-  1. **Draft Artifacts First, Publish to Linear for Review:** Architecture specs, CUJ documents, and design docs are drafted as local Markdown artifacts first and then published to Linear (`save_document`) under the `LUM` team or target project (`P-LUM-1`–`P-LUM-6`) for inline review.
-  2. **User Inline Comments vs. `[AGENT]` Replies:** The user leaves normal inline anchored comments in Linear without any prefix. Whenever an agent posts a comment or reply in Linear via `save_comment`, it **must** prefix the comment body with `[AGENT]` (e.g., `[AGENT] <reply>`) without specifying the agent source.
-  3. **Resolving Review Rounds:** When asked to address comments on a Linear document, the agent calls `list_comments(documentId)`, identifies all threads whose latest comment does **not** start with `[AGENT]`, replies in-thread (`save_comment` with `parentId` and `[AGENT]` prefix), updates the Linear document (`save_document`), and syncs approved docs back into the codebase (`docs/`).
-- **Stay strictly inside your issue's owned paths:** Do not edit files outside the directory/package assigned to your Linear issue unless the issue explicitly covers cross-package integration.
-- **Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and regenerating stubs (`make proto`). Generated Protobuf stubs (`gen/go/`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`) are gitignored and generated on demand via `make proto`.
+Each agent conversation works in its own git worktree, mapped to one Linear issue in the Lumavault (`LUM`) team.
+
+**Linear is the single source of truth for scoping and design docs.** Draft and revise them directly in Linear (`save_document`) under the target project. Do not keep local copies. Only long-lived architecture that the user approves gets copied into `docs/` (for example `docs/BLUEPRINT.md`).
+
+**Doc workflow** (scoping docs, design docs, CUJ specs):
+1. Draft the doc in Linear. A scoping doc lists the proposed issues with title, goal, owned paths, dependencies, and acceptance criteria.
+2. Run review subagents on it (for example `/ponytail-audit`). Post one `[AGENT]` comment per finding on the doc, quoting the line it refers to and the proposed change.
+3. The user reviews the draft and the findings in one pass, leaving inline comments.
+4. Address the comments: `list_comments`, reply in-thread to every thread whose latest comment does not start with `[AGENT]`, and update the doc. Repeat until the user approves.
+5. For scoping docs, create the issues (`save_issue`) only after approval. Never create issues before that.
+
+**Comment prefix:** every comment or reply an agent posts in Linear starts with `[AGENT] `. User comments have no prefix.
+
+**Stay inside your issue's owned paths** (table below) unless the issue explicitly covers cross-package work.
+
+**Contracts are the boundary:** `proto/lumavault/v1/`, `pkg/metadata/store.go` (`MetadataStore`), and `pkg/chunkstore/store.go` (`ChunkStore`) are shared contracts. Do not break their signatures without updating all callers and running `make proto`. Generated stubs (`gen/go/`, `sdk/web/src/gen/`, `sdk/swift/Sources/LumaVaultSDK/Gen/`) are gitignored.
 
 | Linear Project | Owned Paths |
 | :--- | :--- |
@@ -54,13 +58,10 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 - `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK tests.
 - `make build` — Compile `cmd/lumavault`.
 
-## 5. Branch, Pull Request & Linear Linking Workflow
+## 5. Ticket Workflow (Branch, PR, Linear)
 
-Never commit or push directly to `main`, and never keep Antigravity's auto-generated worktree branch slug. Every change follows this lifecycle:
-1. **Step 0 — Reset Worktree Branch Before Editing Repo Files:**
-   - **Linear issue work (default):** If the user hasn't named a `LUM-XX` issue, ask which Linear issue applies before editing repo files. Call Linear `get_issue` to read its exact `gitBranchName` (e.g., `zvishrut/lum-XX-...`), mark the issue `In Progress`, and reset the worktree branch onto `origin/main`:
-     `git fetch origin && git checkout -B <gitBranchName> origin/main`
-   - **Non-issue chores only:** For repo tooling, docs, or CI chores without a Linear issue, use `chore/<slug>`, `docs/<slug>`, or `ci/<slug>` (`git fetch origin && git checkout -B chore/<slug> origin/main`).
-   - Enforced automatically by `.agents/hooks.json` (blocks `write_file`/`edit_file` on invalid branches) and `.githooks/` (`git config core.hooksPath .githooks`).
-2. **Verify Locally:** Run `make lint` and `make test` before pushing.
-3. **Open a PR & Link Linear:** Push the branch (`git push -u origin HEAD`), open a GitHub Pull Request via `gh pr create` referencing `LUM-XX` in the title/body, and attach the PR URL to the Linear issue via `save_issue(id, links: [{url, title}])` while keeping the issue `In Progress` until the PR is merged. **Never push directly to `main` or self-merge PRs**—leave every PR open for user review and passing CI checks.
+Linear's GitHub integration handles issue status and PR links automatically when the branch name matches the issue's `gitBranchName`: the PR is linked, the issue moves to In Progress / In Review, and to Done on merge. Do not update status or attach PR links by hand.
+
+1. **Branch first.** Before editing repo files, get the issue's `gitBranchName` (`get_issue`; ask the user which `LUM-XX` if unclear) and run `git fetch origin && git checkout -B <gitBranchName> origin/main`. Work with no issue (tooling, docs, CI) uses `chore/<slug>`, `docs/<slug>`, or `ci/<slug>` instead. `.githooks/` rejects any other branch name and any commit or push to `main` (enable with `git config core.hooksPath .githooks`).
+2. **Verify.** Run `make lint` and `make test`.
+3. **Open a PR.** `git push -u origin HEAD`, then `gh pr create` with `LUM-XX` in the title. Leave it open for user review and CI. Never push to `main` or merge your own PR.
