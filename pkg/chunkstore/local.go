@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/AgrawalVi/lumavault/pkg/constants"
 )
 
 const (
@@ -94,7 +96,7 @@ func (s *LocalChunkStore) PutChunk(ctx context.Context, hash string, r io.Reader
 		n, readErr := r.Read(buf)
 		if n > 0 {
 			written += int64(n)
-			if written > MaxChunkSizeBytes {
+			if written > constants.MaxChunkSizeBytes {
 				return 0, ErrChunkTooLarge
 			}
 			chunkSlice := buf[:n]

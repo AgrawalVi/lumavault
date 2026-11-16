@@ -13,6 +13,7 @@ import (
 	"time"
 
 	lumavaultv1 "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1"
+	"github.com/AgrawalVi/lumavault/pkg/constants"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -106,7 +107,7 @@ func TestCommitObject_Validation(t *testing.T) {
 			req: &lumavaultv1.CommitObjectRequest{
 				Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,
 				SizeBytes:      1024,
-				ChunkSizeBytes: MaxChunkSizeBytes + 1,
+				ChunkSizeBytes: constants.MaxChunkSizeBytes + 1,
 				Sha256Digest:   validDigest,
 				ChunkHashes:    []string{chunk0},
 			},
@@ -574,6 +575,40 @@ func TestEngine_RestoreDeterminismAndDeepCloneIsolation(t *testing.T) {
 	}, "new-id", time.Now())
 	if err != nil || !dedup || dedupObj.Id != "obj-b" {
 		t.Fatalf("expected deterministic fallback to 'obj-b', got dedup=%v id=%q err=%v", dedup, dedupObj.Id, err)
+	}
+
+	// Verify SkipDedup commits inserted out-of-order maintain oldest-first dedupIndex slice order.
+	skipDigest := testHash("skip-dedup-slice-order")
+	baseTime := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	skipReq := &lumavaultv1.CommitObjectRequest{
+		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
+		SizeBytes:      100,
+		ChunkSizeBytes: 4 << 20,
+		Sha256Digest:   skipDigest,
+		ChunkHashes:    []string{chunk},
+		SkipDedup:      true,
+	}
+	if _, _, err := eng.CommitObject(skipReq, "newer-id", baseTime.Add(10*time.Second)); err != nil {
+		t.Fatalf("CommitObject newer-id: %v", err)
+	}
+	if _, _, err := eng.CommitObject(skipReq, "oldest-id", baseTime); err != nil {
+		t.Fatalf("CommitObject oldest-id: %v", err)
+	}
+	checkReq := &lumavaultv1.CommitObjectRequest{
+		Namespace:      lumavaultv1.Namespace_NAMESPACE_GAMES,
+		SizeBytes:      100,
+		ChunkSizeBytes: 4 << 20,
+		Sha256Digest:   skipDigest,
+		ChunkHashes:    []string{chunk},
+	}
+	if got, dedup, err := eng.CommitObject(checkReq, "unused-1", baseTime); err != nil || !dedup || got.Id != "oldest-id" {
+		t.Fatalf("expected oldest-id from dedupIndex slice, got dedup=%v id=%q err=%v", dedup, got.Id, err)
+	}
+	if err := eng.DeleteObject("oldest-id"); err != nil {
+		t.Fatalf("DeleteObject oldest-id: %v", err)
+	}
+	if got, dedup, err := eng.CommitObject(checkReq, "unused-2", baseTime); err != nil || !dedup || got.Id != "newer-id" {
+		t.Fatalf("expected newer-id after deleting oldest-id, got dedup=%v id=%q err=%v", dedup, got.Id, err)
 	}
 }
 

@@ -16,13 +16,8 @@ enum Namespace {
 }
 
 // ObjectMetadata represents the control-plane manifest for an immutable content-addressed
-// object stored in LumaVault.
-//
-// LumaVault Core is a pure object and chunk storage engine: raw chunk bytes never enter
-// Protobuf messages (they flow over the HTTP Data Plane via PUT/GET /v1/chunks/{sha256}
-// and GET /v1/stream/{id}), and application-layer domain metadata (photo albums/EXIF/Live Photo
-// pairing, TMDB catalog & playback state, IGDB catalog & game save version lineage) lives in
-// the shared PostgreSQL application database referencing ObjectMetadata.id.
+// object stored in LumaVault. Raw chunk bytes flow over the HTTP Data Plane, and
+// application-layer data lives in the shared PostgreSQL application database.
 message ObjectMetadata {
   string id = 1;
   Namespace namespace = 2;

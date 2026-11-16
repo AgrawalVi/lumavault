@@ -9,20 +9,15 @@ import (
 	"fmt"
 
 	lumavaultv1 "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1"
+	"github.com/AgrawalVi/lumavault/pkg/constants"
 )
 
 const (
-	// MaxChunkSizeBytes is the maximum allowed chunk slice size (64 MiB).
-	MaxChunkSizeBytes = 64 << 20
-
 	// DefaultPageSize is the default number of objects returned by ListObjects when page_size is 0.
 	DefaultPageSize = 50
 
 	// MaxPageSize is the maximum number of objects returned in a single ListObjects response.
 	MaxPageSize = 200
-
-	// sha256HexLength is the exact character length of a hex-encoded SHA-256 digest.
-	sha256HexLength = 64
 )
 
 var (
@@ -38,9 +33,7 @@ var (
 // object manifests, idempotent (namespace, sha256_digest) deduplication, storage-level
 // metadata updates, and chunk reference tracking.
 //
-// Application-layer domain metadata (albums/EXIF/Live Photos, TMDB catalog/playback state,
-// IGDB catalog/game save lineage) lives in the shared PostgreSQL application database
-// referencing ObjectMetadata.id.
+// Application-layer data lives in the shared PostgreSQL application database.
 //
 // The Gateway (pkg/gateway) interacts exclusively with this interface, allowing seamless
 // upgrades from the Day-1 LocalMetadataStore to the Project 6 Multi-Paxos replicated store.
@@ -73,8 +66,8 @@ type MetadataStore interface {
 // ValidateHash verifies that hash is a canonical 64-character lowercase hexadecimal SHA-256 digest.
 // Returns ErrInvalidArgument if the hash is malformed.
 func ValidateHash(hash string) error {
-	if len(hash) != sha256HexLength {
-		return fmt.Errorf("%w: hash %q must be %d lowercase hex characters", ErrInvalidArgument, hash, sha256HexLength)
+	if len(hash) != constants.SHA256HexLen {
+		return fmt.Errorf("%w: hash %q must be %d lowercase hex characters", ErrInvalidArgument, hash, constants.SHA256HexLen)
 	}
 	for i := 0; i < len(hash); i++ {
 		c := hash[i]

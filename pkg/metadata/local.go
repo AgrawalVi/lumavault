@@ -16,6 +16,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	objectsSubdir = "objects"
+	tmpSubdir     = "tmp"
+)
+
 // Compile-time check that LocalMetadataStore implements MetadataStore.
 var _ MetadataStore = (*LocalMetadataStore)(nil)
 
@@ -39,9 +44,10 @@ func NewLocalMetadataStore(rootDir string) (*LocalMetadataStore, error) {
 		return nil, errors.New("metadata: rootDir must not be empty")
 	}
 	cleanRoot := filepath.Clean(rootDir)
-	objectsDir := filepath.Join(cleanRoot, "objects")
-	tmpDir := filepath.Join(cleanRoot, "tmp")
+	objectsDir := filepath.Join(cleanRoot, objectsSubdir)
+	tmpDir := filepath.Join(cleanRoot, tmpSubdir)
 
+	// Create the objects directory if missing (mkdir -p with 0755 / rwxr-xr-x).
 	if err := os.MkdirAll(objectsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("metadata: create objects dir: %w", err)
 	}
@@ -49,6 +55,7 @@ func NewLocalMetadataStore(rootDir string) (*LocalMetadataStore, error) {
 	if err := os.RemoveAll(tmpDir); err != nil {
 		return nil, fmt.Errorf("metadata: clean tmp dir: %w", err)
 	}
+	// Create a clean staging directory (mkdir -p with 0755 / rwxr-xr-x).
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return nil, fmt.Errorf("metadata: create tmp dir: %w", err)
 	}
@@ -195,6 +202,8 @@ func (s *LocalMetadataStore) IsChunkReferenced(ctx context.Context, hash string)
 	return s.engine.IsChunkReferenced(hash)
 }
 
+// loadFromDisk reads all <id>.pb manifests in objectsDir, verifies each filename matches
+// its embedded ObjectMetadata.Id, and restores the in-memory Engine.
 func (s *LocalMetadataStore) loadFromDisk() error {
 	entries, err := os.ReadDir(s.objectsDir)
 	if err != nil {
@@ -225,10 +234,12 @@ func (s *LocalMetadataStore) loadFromDisk() error {
 	return s.engine.Restore(objects)
 }
 
+// objectFilePath returns the <objectsDir>/<objectID>.pb path for an object manifest.
 func (s *LocalMetadataStore) objectFilePath(objectID string) string {
 	return filepath.Join(s.objectsDir, objectID+".pb")
 }
 
+// writeObjectFile marshals obj to binary Protobuf and writes it atomically to <objectsDir>/<id>.pb.
 func (s *LocalMetadataStore) writeObjectFile(obj *lumavaultv1.ObjectMetadata) error {
 	if !isSafeObjectID(obj.Id) {
 		return fmt.Errorf("%w: unsafe object_id %q", ErrInvalidArgument, obj.Id)
@@ -240,6 +251,7 @@ func (s *LocalMetadataStore) writeObjectFile(obj *lumavaultv1.ObjectMetadata) er
 	return s.writeFileAtomic(s.objectFilePath(obj.Id), raw)
 }
 
+// writeFileAtomic stages data in tmpDir, fsyncs it, and atomically renames it over destPath.
 func (s *LocalMetadataStore) writeFileAtomic(destPath string, data []byte) (retErr error) {
 	tmpFile, err := os.CreateTemp(s.tmpDir, "meta-*")
 	if err != nil {
@@ -260,6 +272,7 @@ func (s *LocalMetadataStore) writeFileAtomic(destPath string, data []byte) (retE
 	if _, err := tmpFile.Write(data); err != nil {
 		return fmt.Errorf("metadata: write temp file: %w", err)
 	}
+	// os.CreateTemp creates files with 0600 (owner-only); widen to 0644 (rw-r--r--) before publishing.
 	if err := tmpFile.Chmod(0o644); err != nil {
 		return fmt.Errorf("metadata: chmod temp file: %w", err)
 	}
@@ -277,6 +290,7 @@ func (s *LocalMetadataStore) writeFileAtomic(destPath string, data []byte) (retE
 	return nil
 }
 
+// newUUIDv4 generates a random RFC 4122 version-4 UUID string.
 func newUUIDv4() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

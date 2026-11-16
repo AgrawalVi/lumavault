@@ -10,6 +10,7 @@ import (
 	"time"
 
 	lumavaultv1 "github.com/AgrawalVi/lumavault/gen/go/lumavault/v1"
+	"github.com/AgrawalVi/lumavault/pkg/constants"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -35,7 +36,7 @@ type pageCursor struct {
 // consensus apply loop).
 type Engine struct {
 	objects    map[string]*lumavaultv1.ObjectMetadata
-	dedupIndex map[dedupKey]string
+	dedupIndex map[dedupKey][]string // object IDs ordered oldest-first (CreatedAt ASC, Id ASC)
 	chunkRefs  map[string]int
 }
 
@@ -43,7 +44,7 @@ type Engine struct {
 func NewEngine() *Engine {
 	return &Engine{
 		objects:    make(map[string]*lumavaultv1.ObjectMetadata),
-		dedupIndex: make(map[dedupKey]string),
+		dedupIndex: make(map[dedupKey][]string),
 		chunkRefs:  make(map[string]int),
 	}
 }
@@ -65,21 +66,19 @@ func (e *Engine) Restore(objects []*lumavaultv1.ObjectMetadata) error {
 		sorted[i] = cloneObject(obj)
 	}
 
-	// Sort by CreatedAt ASC, ID ASC so deduplication index population is deterministic.
+	// Sort oldest-first (CreatedAt ASC, Id ASC) so deduplication slice order is deterministic.
 	sort.Slice(sorted, func(i, j int) bool {
 		return compareObjectsAsc(sorted[i], sorted[j]) < 0
 	})
 
 	newObjects := make(map[string]*lumavaultv1.ObjectMetadata, len(sorted))
-	newDedup := make(map[dedupKey]string, len(sorted))
+	newDedup := make(map[dedupKey][]string, len(sorted))
 	newChunkRefs := make(map[string]int)
 
 	for _, obj := range sorted {
 		newObjects[obj.Id] = obj
 		key := dedupKey{namespace: obj.Namespace, sha256: obj.Sha256Digest}
-		if _, exists := newDedup[key]; !exists {
-			newDedup[key] = obj.Id
-		}
+		newDedup[key] = append(newDedup[key], obj.Id)
 		adjustChunkRefsMap(newChunkRefs, obj, +1)
 	}
 
@@ -104,11 +103,8 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 
 	key := dedupKey{namespace: req.Namespace, sha256: req.Sha256Digest}
 	if !req.SkipDedup {
-		if existingID, ok := e.dedupIndex[key]; ok {
-			if existingObj, exists := e.objects[existingID]; exists {
-				return cloneObject(existingObj), true, nil
-			}
-			delete(e.dedupIndex, key)
+		if ids := e.dedupIndex[key]; len(ids) > 0 {
+			return cloneObject(e.objects[ids[0]]), true, nil
 		}
 	}
 
@@ -132,11 +128,7 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 	}
 
 	e.objects[objectID] = obj
-	if !req.SkipDedup {
-		e.dedupIndex[key] = objectID
-	} else if _, exists := e.dedupIndex[key]; !exists {
-		e.dedupIndex[key] = objectID
-	}
+	e.insertDedupID(key, obj)
 	adjustChunkRefsMap(e.chunkRefs, obj, +1)
 
 	return cloneObject(obj), false, nil
@@ -273,22 +265,12 @@ func (e *Engine) DeleteObject(objectID string) error {
 
 	delete(e.objects, objectID)
 
+	// Remove objectID from the oldest-first slice; if others remain, ids[0] is the oldest remaining object.
 	key := dedupKey{namespace: existing.Namespace, sha256: existing.Sha256Digest}
-	if e.dedupIndex[key] == objectID {
+	if ids := slices.DeleteFunc(e.dedupIndex[key], func(id string) bool { return id == objectID }); len(ids) > 0 {
+		e.dedupIndex[key] = ids
+	} else {
 		delete(e.dedupIndex, key)
-		// Deterministically select the earliest remaining object with the same (namespace, sha256)
-		// using the same (CreatedAt ASC, Id ASC) ordering as Restore.
-		var best *lumavaultv1.ObjectMetadata
-		for _, candidate := range e.objects {
-			if candidate.Namespace == existing.Namespace && candidate.Sha256Digest == existing.Sha256Digest {
-				if best == nil || compareObjectsAsc(candidate, best) < 0 {
-					best = candidate
-				}
-			}
-		}
-		if best != nil {
-			e.dedupIndex[key] = best.Id
-		}
 	}
 
 	adjustChunkRefsMap(e.chunkRefs, existing, -1)
@@ -303,11 +285,14 @@ func (e *Engine) IsChunkReferenced(hash string) (bool, error) {
 	return e.chunkRefs[hash] > 0, nil
 }
 
+// hasObject reports whether an object with objectID exists in the engine without cloning it.
 func (e *Engine) hasObject(objectID string) bool {
 	_, ok := e.objects[objectID]
 	return ok
 }
 
+// putObjectDirect restores a previously committed object record in place and reconciles its
+// chunk reference counts when rolling back a failed disk write during UpdateObjectMetadata.
 func (e *Engine) putObjectDirect(obj *lumavaultv1.ObjectMetadata) {
 	if obj == nil || !isSafeObjectID(obj.Id) {
 		return
@@ -320,6 +305,17 @@ func (e *Engine) putObjectDirect(obj *lumavaultv1.ObjectMetadata) {
 	adjustChunkRefsMap(e.chunkRefs, cloned, +1)
 }
 
+// insertDedupID inserts obj.Id into dedupIndex[key] in oldest-first (CreatedAt ASC, Id ASC) order.
+func (e *Engine) insertDedupID(key dedupKey, obj *lumavaultv1.ObjectMetadata) {
+	ids := e.dedupIndex[key]
+	idx, _ := slices.BinarySearchFunc(ids, obj, func(existingID string, target *lumavaultv1.ObjectMetadata) int {
+		return compareObjectsAsc(e.objects[existingID], target)
+	})
+	e.dedupIndex[key] = slices.Insert(ids, idx, obj.Id)
+}
+
+// adjustChunkRefsMap increments or decrements per-object unique chunk reference counts in refs
+// across chunk_hashes and thumbnail_chunk_hash, removing entries whose count drops to zero.
 func adjustChunkRefsMap(refs map[string]int, obj *lumavaultv1.ObjectMetadata, delta int) {
 	seen := make(map[string]struct{}, len(obj.ChunkHashes)+1)
 	for _, h := range obj.ChunkHashes {
@@ -341,6 +337,7 @@ func adjustChunkRefsMap(refs map[string]int, obj *lumavaultv1.ObjectMetadata, de
 	}
 }
 
+// validateCommitRequest validates namespace, SHA-256 digests, chunk size bounds, and chunk count math.
 func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 	if !isValidNamespace(req.Namespace) {
 		return fmt.Errorf("%w: invalid or unspecified namespace %v", ErrInvalidArgument, req.Namespace)
@@ -360,8 +357,8 @@ func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 		}
 	}
 
-	if req.ChunkSizeBytes > MaxChunkSizeBytes {
-		return fmt.Errorf("%w: chunk_size_bytes (%d) exceeds max (%d)", ErrInvalidArgument, req.ChunkSizeBytes, MaxChunkSizeBytes)
+	if req.ChunkSizeBytes > constants.MaxChunkSizeBytes {
+		return fmt.Errorf("%w: chunk_size_bytes (%d) exceeds max (%d)", ErrInvalidArgument, req.ChunkSizeBytes, constants.MaxChunkSizeBytes)
 	}
 
 	if req.SizeBytes == 0 {
@@ -382,6 +379,7 @@ func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 	return nil
 }
 
+// applyFieldMaskPath copies a single mutable FieldMask field from src onto updated.
 func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) error {
 	switch path {
 	case "filename":
@@ -401,6 +399,7 @@ func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) e
 	return nil
 }
 
+// isValidNamespace reports whether ns is a defined, non-unspecified LumaVault namespace.
 func isValidNamespace(ns lumavaultv1.Namespace) bool {
 	switch ns {
 	case lumavaultv1.Namespace_NAMESPACE_PHOTOS,
@@ -412,6 +411,9 @@ func isValidNamespace(ns lumavaultv1.Namespace) bool {
 	}
 }
 
+// isSafeObjectID rejects empty IDs, relative path segments ("." and ".."), and path
+// separators ('/' and '\') so an objectID can never traverse outside <rootDir>/objects/
+// when mapped to <id>.pb on disk.
 func isSafeObjectID(id string) bool {
 	if id == "" || id == "." || id == ".." {
 		return false
@@ -419,6 +421,7 @@ func isSafeObjectID(id string) bool {
 	return !strings.ContainsAny(id, `/\`)
 }
 
+// compareObjectsAsc orders objects oldest-first by (CreatedAt ASC, Id ASC).
 func compareObjectsAsc(a, b *lumavaultv1.ObjectMetadata) int {
 	ta := a.GetCreatedAt().AsTime().UnixNano()
 	tb := b.GetCreatedAt().AsTime().UnixNano()
@@ -437,6 +440,7 @@ func compareObjectsAsc(a, b *lumavaultv1.ObjectMetadata) int {
 	return 0
 }
 
+// compareObjectsDesc orders objects newest-first by (CreatedAt DESC, Id ASC) for ListObjects.
 func compareObjectsDesc(a, b *lumavaultv1.ObjectMetadata) int {
 	ta := a.GetCreatedAt().AsTime().UnixNano()
 	tb := b.GetCreatedAt().AsTime().UnixNano()
@@ -455,6 +459,7 @@ func compareObjectsDesc(a, b *lumavaultv1.ObjectMetadata) int {
 	return 0
 }
 
+// isAfterCursor reports whether obj falls strictly after cursor c under (CreatedAt DESC, Id ASC) ordering.
 func isAfterCursor(obj *lumavaultv1.ObjectMetadata, c *pageCursor) bool {
 	t := obj.GetCreatedAt().AsTime().UnixNano()
 	if t != c.CreatedAtNanos {
@@ -463,6 +468,7 @@ func isAfterCursor(obj *lumavaultv1.ObjectMetadata, c *pageCursor) bool {
 	return obj.Id > c.ID
 }
 
+// encodePageToken encodes obj's (CreatedAt, Id) sort key as a URL-safe base64 pagination token.
 func encodePageToken(obj *lumavaultv1.ObjectMetadata) string {
 	c := pageCursor{
 		CreatedAtNanos: obj.GetCreatedAt().AsTime().UnixNano(),
@@ -472,6 +478,7 @@ func encodePageToken(obj *lumavaultv1.ObjectMetadata) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// decodePageToken parses and validates a URL-safe base64 pagination token.
 func decodePageToken(token string) (*pageCursor, error) {
 	b, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
@@ -484,6 +491,7 @@ func decodePageToken(token string) (*pageCursor, error) {
 	return &c, nil
 }
 
+// cloneObject returns a deep Protobuf copy of obj so callers cannot mutate engine state.
 func cloneObject(obj *lumavaultv1.ObjectMetadata) *lumavaultv1.ObjectMetadata {
 	if obj == nil {
 		return nil
@@ -491,6 +499,7 @@ func cloneObject(obj *lumavaultv1.ObjectMetadata) *lumavaultv1.ObjectMetadata {
 	return proto.Clone(obj).(*lumavaultv1.ObjectMetadata)
 }
 
+// cloneTimestamp returns a deep Protobuf copy of ts.
 func cloneTimestamp(ts *timestamppb.Timestamp) *timestamppb.Timestamp {
 	if ts == nil {
 		return nil
