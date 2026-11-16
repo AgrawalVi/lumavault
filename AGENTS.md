@@ -42,7 +42,11 @@ Each AI agent conversation works in an isolated **git worktree** mapped to a spe
 
 ## 4. Branch, Pull Request & Linear Linking Workflow
 
-Never commit or push directly to `main`. Every change follows this lifecycle:
-1. **Branch Off `origin/main`:** Fetch `origin` (`git fetch origin`) and create a branch named with the Linear issue's `gitBranchName` (e.g., `zvishrut/lum-XX-...` or `<type>/<slug>` for non-issue chores, inside an isolated `git worktree` when working in parallel). Keep `git config core.hooksPath .githooks` enabled so direct commits and pushes to `main` are blocked locally.
+Never commit or push directly to `main`, and never keep Antigravity's auto-generated worktree branch slug. Every change follows this lifecycle:
+1. **Step 0 — Reset Worktree Branch Before Editing Repo Files:**
+   - **Linear issue work (default):** If the user hasn't named a `LUM-XX` issue, ask which Linear issue applies before editing repo files. Call Linear `get_issue` to read its exact `gitBranchName` (e.g., `zvishrut/lum-XX-...`), mark the issue `In Progress`, and reset the worktree branch onto `origin/main`:
+     `git fetch origin && git checkout -B <gitBranchName> origin/main`
+   - **Non-issue chores only:** For repo tooling, docs, or CI chores without a Linear issue, use `chore/<slug>`, `docs/<slug>`, or `ci/<slug>` (`git fetch origin && git checkout -B chore/<slug> origin/main`).
+   - Enforced automatically by `.agents/hooks.json` (blocks `write_file`/`edit_file` on invalid branches) and `.githooks/` (`git config core.hooksPath .githooks`).
 2. **Verify Locally:** Run `make lint` and `make test` before pushing.
 3. **Open a PR & Link Linear:** Push the branch (`git push -u origin HEAD`), open a GitHub Pull Request via `gh pr create` referencing `LUM-XX` in the title/body, and attach the PR URL to the Linear issue via `save_issue(id, links: [{url, title}])` while keeping the issue `In Progress` until the PR is merged. **Never push directly to `main` or self-merge PRs**—leave every PR open for user review and passing CI checks.
