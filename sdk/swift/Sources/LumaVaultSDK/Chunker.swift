@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Metadata describing a single content-addressed slice within a planned file or `Data` buffer.
@@ -44,12 +45,12 @@ public enum Chunker {
     public static let maxChunkSizeBytes = 64 * 1024 * 1024
     /// Default chunk slice size (`4 MiB`) for general uploads.
     public static let defaultChunkSizeBytes = minChunkSizeBytes
-    /// Default chunk slice size (`64 MiB`) for Cinema 4K media uploads.
-    public static let cinemaChunkSizeBytes = maxChunkSizeBytes
     /// Buffer size (`32 KiB`) used when streaming files from disk.
     public static let streamBufferSizeBytes = 32 * 1024
 
     private static let sha256HexLength = 64
+    private static let progressStepBytes: UInt64 = 1024 * 1024
+    private static let maxReservedChunkCount: UInt64 = 16_384
     private static let hexDigits: [UInt8] = Array("0123456789abcdef".utf8)
 
     /// Returns the default chunk size (`4 MiB` for Photos/Games, `64 MiB` for Cinema).
@@ -91,26 +92,31 @@ public enum Chunker {
         hexString(SHA256.hash(data: data))
     }
 
-    /// Streams a file from disk in `32 KiB` `autoreleasepool` blocks and returns its lowercase hex `SHA-256`.
+    /// Streams a regular file from disk in `32 KiB` `autoreleasepool` blocks and returns its lowercase hex `SHA-256`.
     public static func sha256Hex(ofFileAt fileURL: URL) throws -> String {
         try Task.checkCancellation()
-        let handle = try FileHandle(forReadingFrom: fileURL)
+        let (handle, statBefore) = try openRegularFile(at: fileURL)
         defer { try? handle.close() }
 
         var hasher = SHA256()
+        var totalBytesRead: UInt64 = 0
+
         while true {
             try Task.checkCancellation()
-            let reachedEOF: Bool = try autoreleasepool {
+            let bytesRead: Int = try autoreleasepool {
                 guard let chunk = try handle.read(upToCount: streamBufferSizeBytes), !chunk.isEmpty else {
-                    return true
+                    return 0
                 }
                 hasher.update(data: chunk)
-                return false
+                return chunk.count
             }
-            if reachedEOF {
+            if bytesRead == 0 {
                 break
             }
+            totalBytesRead += UInt64(bytesRead)
         }
+
+        try verifyUnmodified(handle, before: statBefore, bytesRead: totalBytesRead, fileURL: fileURL)
         return hexString(hasher.finalize())
     }
 
@@ -124,33 +130,36 @@ public enum Chunker {
         try validateChunkSize(chunkSizeBytes)
         try Task.checkCancellation()
 
-        let handle = try FileHandle(forReadingFrom: fileURL)
+        let (handle, statBefore) = try openRegularFile(at: fileURL)
         defer { try? handle.close() }
 
-        let expectedTotalBytes = try handle.seekToEnd()
-        try handle.seek(toOffset: 0)
+        let expectedTotalBytes = UInt64(statBefore.st_size)
 
         var fileHasher = SHA256()
         var chunkHasher = SHA256()
         var chunks: [ChunkDescriptor] = []
         if expectedTotalBytes > 0 {
-            let estimatedChunks = Int((expectedTotalBytes + UInt64(chunkSizeBytes) - 1) / UInt64(chunkSizeBytes))
-            chunks.reserveCapacity(estimatedChunks)
+            let estimatedChunks = 1 + (expectedTotalBytes - 1) / UInt64(chunkSizeBytes)
+            chunks.reserveCapacity(Int(min(estimatedChunks, maxReservedChunkCount)))
         }
 
         var totalBytesRead: UInt64 = 0
+        var lastReportedBytes: UInt64 = 0
         var currentChunkOffset: UInt64 = 0
         var currentChunkLength = 0
 
         while true {
             try Task.checkCancellation()
             let readLimit = min(streamBufferSizeBytes, chunkSizeBytes - currentChunkLength)
+            let isFirstChunk = chunks.isEmpty
             let bytesReadCount: Int = try autoreleasepool {
                 guard let buffer = try handle.read(upToCount: readLimit), !buffer.isEmpty else {
                     return 0
                 }
                 fileHasher.update(data: buffer)
-                chunkHasher.update(data: buffer)
+                if !isFirstChunk {
+                    chunkHasher.update(data: buffer)
+                }
                 return buffer.count
             }
 
@@ -161,11 +170,14 @@ public enum Chunker {
             totalBytesRead += UInt64(bytesReadCount)
             currentChunkLength += bytesReadCount
 
+            var hitChunkBoundary = false
             if currentChunkLength == chunkSizeBytes {
+                // SHA256.finalize() is nonmutating, so chunk 0 reuses fileHasher without hashing twice.
+                let digest = isFirstChunk ? fileHasher.finalize() : chunkHasher.finalize()
                 chunks.append(
                     ChunkDescriptor(
                         index: chunks.count,
-                        hash: hexString(chunkHasher.finalize()),
+                        hash: hexString(digest),
                         offset: currentChunkOffset,
                         length: currentChunkLength
                     )
@@ -173,28 +185,38 @@ public enum Chunker {
                 chunkHasher = SHA256()
                 currentChunkOffset += UInt64(currentChunkLength)
                 currentChunkLength = 0
+                hitChunkBoundary = true
             }
 
-            onProgress?(totalBytesRead, max(totalBytesRead, expectedTotalBytes))
+            if hitChunkBoundary || totalBytesRead - lastReportedBytes >= progressStepBytes {
+                lastReportedBytes = totalBytesRead
+                onProgress?(totalBytesRead, max(totalBytesRead, expectedTotalBytes))
+            }
         }
 
+        try verifyUnmodified(handle, before: statBefore, bytesRead: totalBytesRead, fileURL: fileURL)
+
+        let wholeDigest = hexString(fileHasher.finalize())
         if currentChunkLength > 0 {
+            let tailHash = chunks.isEmpty ? wholeDigest : hexString(chunkHasher.finalize())
             chunks.append(
                 ChunkDescriptor(
                     index: chunks.count,
-                    hash: hexString(chunkHasher.finalize()),
+                    hash: tailHash,
                     offset: currentChunkOffset,
                     length: currentChunkLength
                 )
             )
-        } else if totalBytesRead == 0 {
-            onProgress?(0, 0)
+        }
+
+        if totalBytesRead == 0 || lastReportedBytes < totalBytesRead {
+            onProgress?(totalBytesRead, totalBytesRead)
         }
 
         return ChunkPlan(
             sizeBytes: totalBytesRead,
             chunkSizeBytes: chunkSizeBytes,
-            sha256Digest: hexString(fileHasher.finalize()),
+            sha256Digest: wholeDigest,
             chunks: chunks
         )
     }
@@ -219,7 +241,7 @@ public enum Chunker {
             )
         }
 
-        let estimatedChunks = (totalCount + chunkSizeBytes - 1) / chunkSizeBytes
+        let estimatedChunks = 1 + (totalCount - 1) / chunkSizeBytes
         var chunks: [ChunkDescriptor] = []
         chunks.reserveCapacity(estimatedChunks)
 
@@ -263,42 +285,26 @@ public enum Chunker {
         )
     }
 
-    /// Seeks to `offset` in `fileURL` and reads an exact `length`-byte chunk slice on demand.
+    /// Seeks to `offset` in `fileURL` and streams an exact `length`-byte chunk slice in `32 KiB`
+    /// `autoreleasepool` blocks.
     public static func readChunk(
         from fileURL: URL,
         offset: UInt64,
         length: Int
     ) throws -> Data {
-        guard length >= 0 && length <= maxChunkSizeBytes else {
-            throw LumaVaultError.invalidChunkSize(length)
-        }
-        try Task.checkCancellation()
-
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-
-        try handle.seek(toOffset: offset)
-        if length == 0 {
-            return Data()
-        }
-
-        var result = Data()
-        result.reserveCapacity(length)
-
-        while result.count < length {
-            try Task.checkCancellation()
-            let remaining = length - result.count
-            guard let part = try handle.read(upToCount: remaining), !part.isEmpty else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
-            result.append(part)
-        }
-        return result
+        try readChunkInternal(from: fileURL, offset: offset, length: length, expectedHash: nil)
     }
 
-    /// Reads a planned `ChunkDescriptor` slice from `fileURL` on demand.
+    /// Reads a planned `ChunkDescriptor` slice from `fileURL` on demand and verifies `chunk.hash`
+    /// so concurrent on-disk mutations are caught before uploading.
     public static func readChunk(from fileURL: URL, chunk: ChunkDescriptor) throws -> Data {
-        try readChunk(from: fileURL, offset: chunk.offset, length: chunk.length)
+        try validateHash(chunk.hash)
+        return try readChunkInternal(
+            from: fileURL,
+            offset: chunk.offset,
+            length: chunk.length,
+            expectedHash: chunk.hash
+        )
     }
 
     /// Extracts a `ChunkDescriptor` slice from an in-memory `Data` value, respecting non-zero `startIndex`.
@@ -307,7 +313,7 @@ public enum Chunker {
             throw LumaVaultError.invalidChunkSize(chunk.length)
         }
         guard chunk.offset <= UInt64(data.count),
-              Int(chunk.offset) + chunk.length <= data.count
+              chunk.length <= data.count - Int(chunk.offset)
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -315,6 +321,8 @@ public enum Chunker {
         let end = data.index(start, offsetBy: chunk.length)
         return Data(data[start..<end])
     }
+
+    // MARK: - Internal & Private Helpers
 
     internal static func hexString(_ digest: SHA256Digest) -> String {
         var bytes = [UInt8]()
@@ -324,5 +332,103 @@ public enum Chunker {
             bytes.append(hexDigits[Int(byte & 0x0F)])
         }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func readChunkInternal(
+        from fileURL: URL,
+        offset: UInt64,
+        length: Int,
+        expectedHash: String?
+    ) throws -> Data {
+        guard length >= 0 && length <= maxChunkSizeBytes else {
+            throw LumaVaultError.invalidChunkSize(length)
+        }
+        try Task.checkCancellation()
+
+        let (handle, _) = try openRegularFile(at: fileURL)
+        defer { try? handle.close() }
+
+        try handle.seek(toOffset: offset)
+
+        if length == 0 {
+            if let expectedHash {
+                let emptyHash = sha256Hex(of: Data())
+                guard emptyHash == expectedHash else {
+                    throw LumaVaultError.hashMismatch(expected: expectedHash, actual: emptyHash)
+                }
+            }
+            return Data()
+        }
+
+        var result = Data(capacity: length)
+        var hasher = expectedHash != nil ? SHA256() : nil
+
+        while result.count < length {
+            try Task.checkCancellation()
+            let readLimit = min(streamBufferSizeBytes, length - result.count)
+            let gotEOF: Bool = try autoreleasepool {
+                guard let part = try handle.read(upToCount: readLimit), !part.isEmpty else {
+                    return true
+                }
+                hasher?.update(data: part)
+                result.append(part)
+                return false
+            }
+            if gotEOF {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+
+        if let expectedHash, let hasher {
+            let actualHash = hexString(hasher.finalize())
+            guard actualHash == expectedHash else {
+                throw LumaVaultError.hashMismatch(expected: expectedHash, actual: actualHash)
+            }
+        }
+        return result
+    }
+
+    private static func openRegularFile(at fileURL: URL) throws -> (FileHandle, Darwin.stat) {
+        guard fileURL.isFileURL,
+              !fileURL.hasDirectoryPath,
+              (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) != false
+        else {
+            throw LumaVaultError.invalidArgument("URL is not a regular file: \(fileURL.path)")
+        }
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        do {
+            let st = try statRegularFile(handle, fileURL: fileURL)
+            return (handle, st)
+        } catch {
+            try? handle.close()
+            throw error
+        }
+    }
+
+    private static func statRegularFile(_ handle: FileHandle, fileURL: URL) throws -> Darwin.stat {
+        var st = Darwin.stat()
+        guard Darwin.fstat(handle.fileDescriptor, &st) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard (st.st_mode & S_IFMT) == S_IFREG, st.st_size >= 0 else {
+            throw LumaVaultError.invalidArgument("URL is not a regular file: \(fileURL.path)")
+        }
+        return st
+    }
+
+    private static func verifyUnmodified(
+        _ handle: FileHandle,
+        before: Darwin.stat,
+        bytesRead: UInt64,
+        fileURL: URL
+    ) throws {
+        let after = try statRegularFile(handle, fileURL: fileURL)
+        guard bytesRead == UInt64(before.st_size),
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
     }
 }

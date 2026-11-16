@@ -32,7 +32,7 @@ final class DataPlaneClientTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testURLBuildersNormalizeSlashesAndEncodeObjectIDs() {
+    func testURLBuildersNormalizeSlashesAndPreventDotTraversal() {
         let hash = String(repeating: "a", count: 64)
         XCTAssertEqual(
             client.chunkURL(forHash: hash).absoluteString,
@@ -41,6 +41,18 @@ final class DataPlaneClientTests: XCTestCase {
         XCTAssertEqual(
             client.streamURL(forObjectID: "obj-123").absoluteString,
             "https://vault.example.com/v1/stream/obj-123"
+        )
+        XCTAssertEqual(
+            client.streamURL(forObjectID: ".").absoluteString,
+            "https://vault.example.com/v1/stream/%2E"
+        )
+        XCTAssertEqual(
+            client.streamURL(forObjectID: "..").absoluteString,
+            "https://vault.example.com/v1/stream/%2E%2E"
+        )
+        XCTAssertEqual(
+            client.streamURL(forObjectID: "100%real").absoluteString,
+            "https://vault.example.com/v1/stream/100%25real"
         )
 
         let prefixed = DataPlaneClient(
@@ -116,7 +128,7 @@ final class DataPlaneClientTests: XCTestCase {
         }
     }
 
-    func testGetChunkVerifiesSHA256AndDetectsCorruption() async throws {
+    func testGetChunkVerifiesSHA256DetectsCorruptionAndHandles404() async throws {
         let payload = Data("immutable-thumbnail-bytes".utf8)
         let hash = Chunker.sha256Hex(of: payload)
 
@@ -148,9 +160,44 @@ final class DataPlaneClientTests: XCTestCase {
         } catch let error as LumaVaultError {
             XCTAssertEqual(error, .hashMismatch(expected: hash, actual: corruptedHash))
         }
+
+        // HTTP 404 maps to httpError.
+        MockURLProtocol.setHandler { _, _ in
+            MockResponse(statusCode: 404, body: Data("chunk not found".utf8))
+        }
+        do {
+            _ = try await client.getChunk(hash: hash)
+            XCTFail("Expected 404 httpError")
+        } catch let error as LumaVaultError {
+            XCTAssertEqual(error, .httpError(statusCode: 404, message: "chunk not found"))
+        }
     }
 
-    func testDownloadStreamToFileQuotedETagAndAtomicOverwrite() async throws {
+    func testDownloadStreamToFileQuotedETagPermissionsAndAtomicOverwrite() async throws {
+        // Invalid objectID or directory destination fails before hitting URLSession.
+        for badID in ["", ".", "..", "   "] {
+            do {
+                try await client.downloadStreamToFile(
+                    objectID: badID,
+                    to: tempDirectory.appendingPathComponent("out.bin")
+                )
+                XCTFail("Expected invalidArgument for \(badID)")
+            } catch let error as LumaVaultError {
+                guard case .invalidArgument = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+        do {
+            try await client.downloadStreamToFile(objectID: "obj-1", to: tempDirectory)
+            XCTFail("Expected invalidArgument for directory destination")
+        } catch let error as LumaVaultError {
+            guard case .invalidArgument = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(MockURLProtocol.requestCount, 0)
+
         // Use > 32 KiB (96 KiB) so multi-block 32 KiB autoreleasepool hashing is exercised.
         let initialBytes = Data((0 ..< 96 * 1024).map { UInt8($0 & 0xFF) })
         let initialHash = Chunker.sha256Hex(of: initialBytes)
@@ -169,6 +216,10 @@ final class DataPlaneClientTests: XCTestCase {
         try await client.downloadStreamToFile(objectID: "obj-rom-1", to: destination)
         XCTAssertEqual(try Data(contentsOf: destination), initialBytes)
 
+        let attrs = try FileManager.default.attributesOfItem(atPath: destination.path)
+        let posixPerms = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+        XCTAssertEqual(posixPerms & 0o777, 0o644)
+
         // Overwrite existing file atomically with updated content.
         let updatedBytes = Data("updated-save-state-v2".utf8)
         let updatedHash = Chunker.sha256Hex(of: updatedBytes)
@@ -185,7 +236,7 @@ final class DataPlaneClientTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), updatedBytes)
     }
 
-    func testDownloadStreamToFileRejectsMissingOrWeakETagAndCleansUpTempFiles() async throws {
+    func testDownloadStreamToFileRejectsInvalidETagsAndCleansUpTempFiles() async throws {
         let originalContent = Data("keep-me-safe".utf8)
         let destination = tempDirectory.appendingPathComponent("safe.sav")
         try originalContent.write(to: destination)
@@ -194,36 +245,28 @@ final class DataPlaneClientTests: XCTestCase {
         let payloadHash = Chunker.sha256Hex(of: payload)
 
         // 1. Missing ETag when expectedSHA256 is nil -> invalidResponse.
-        MockURLProtocol.setHandler { _, _ in
-            MockResponse(statusCode: 200, headers: [:], body: payload)
-        }
-        let beforeMissing = snapshotCFNetworkTempFiles()
-        do {
-            try await client.downloadStreamToFile(objectID: "obj-no-etag", to: destination)
-            XCTFail("Expected invalidResponse for missing ETag")
-        } catch let error as LumaVaultError {
-            guard case .invalidResponse = error else {
-                return XCTFail("Unexpected error: \(error)")
+        for badHeaders in [
+            [:],
+            ["ETag": "W/\"\(payloadHash)\""],
+            ["ETag": payloadHash], // Unquoted ETag rejected per RFC 9110
+        ] {
+            MockURLProtocol.setHandler { _, _ in
+                MockResponse(statusCode: 200, headers: badHeaders, body: payload)
             }
-        }
-        XCTAssertTrue(snapshotCFNetworkTempFiles().subtracting(beforeMissing).isEmpty)
-        XCTAssertEqual(try Data(contentsOf: destination), originalContent)
-
-        // 2. Weak ETag -> invalidResponse.
-        MockURLProtocol.setHandler { _, _ in
-            MockResponse(statusCode: 200, headers: ["ETag": "W/\"\(payloadHash)\""], body: payload)
-        }
-        do {
-            try await client.downloadStreamToFile(objectID: "obj-weak-etag", to: destination)
-            XCTFail("Expected invalidResponse for weak ETag")
-        } catch let error as LumaVaultError {
-            guard case .invalidResponse = error else {
-                return XCTFail("Unexpected error: \(error)")
+            let before = snapshotCFNetworkTempFiles()
+            do {
+                try await client.downloadStreamToFile(objectID: "obj-bad-etag", to: destination)
+                XCTFail("Expected invalidResponse for headers \(badHeaders)")
+            } catch let error as LumaVaultError {
+                guard case .invalidResponse = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
             }
+            XCTAssertTrue(snapshotCFNetworkTempFiles().subtracting(before).isEmpty)
+            XCTAssertEqual(try Data(contentsOf: destination), originalContent)
         }
-        XCTAssertEqual(try Data(contentsOf: destination), originalContent)
 
-        // 3. HTTP 404 -> httpError and cleans up temp file, leaving existing destination intact.
+        // 2. HTTP 404 -> httpError and cleans up temp file, leaving existing destination intact.
         MockURLProtocol.setHandler { _, _ in
             MockResponse(statusCode: 404, body: Data("object not found".utf8))
         }
@@ -237,7 +280,7 @@ final class DataPlaneClientTests: XCTestCase {
         XCTAssertTrue(snapshotCFNetworkTempFiles().subtracting(before404).isEmpty)
         XCTAssertEqual(try Data(contentsOf: destination), originalContent)
 
-        // 4. Corrupted body -> hashMismatch, cleans up temp file, leaves existing destination intact.
+        // 3. Corrupted body -> hashMismatch, cleans up temp file, leaves existing destination intact.
         let wrongExpected = String(repeating: "f", count: 64)
         MockURLProtocol.setHandler { _, _ in
             MockResponse(
@@ -261,7 +304,7 @@ final class DataPlaneClientTests: XCTestCase {
         )
     }
 
-    func testDownloadStreamDataVerifiesETagAndEnforcesMaxBytesCap() async throws {
+    func testDownloadStreamDataVerifiesETagEnforcesMaxBytesAndMapsErrors() async throws {
         let saveBytes = Data((0 ..< 80 * 1024).map { UInt8(($0 * 3) & 0xFF) })
         let saveHash = Chunker.sha256Hex(of: saveBytes)
 
@@ -277,15 +320,12 @@ final class DataPlaneClientTests: XCTestCase {
         let downloaded = try await client.downloadStreamData(objectID: "save-v1")
         XCTAssertEqual(downloaded, saveBytes)
 
-        // Exceeding maxBytes aborts with payloadTooLarge.
+        // Exceeding maxBytes while streaming aborts with payloadTooLarge.
         do {
             _ = try await client.downloadStreamData(objectID: "save-v1", maxBytes: 1024)
             XCTFail("Expected payloadTooLarge")
         } catch let error as LumaVaultError {
-            guard case .payloadTooLarge(_, let maxBytes) = error else {
-                return XCTFail("Unexpected error: \(error)")
-            }
-            XCTAssertEqual(maxBytes, 1024)
+            XCTAssertEqual(error, .payloadTooLarge(sizeBytes: 1025, maxBytes: 1024))
         }
 
         // Explicit expectedSHA256 succeeds even without ETag.
@@ -297,6 +337,42 @@ final class DataPlaneClientTests: XCTestCase {
             expectedSHA256: saveHash
         )
         XCTAssertEqual(verifiedExplicit, saveBytes)
+
+        // Corrupted stream bytes throw hashMismatch.
+        var corruptedSave = saveBytes
+        corruptedSave[17] ^= 0xAA
+        MockURLProtocol.setHandler { [corruptedSave] _, _ in
+            MockResponse(
+                statusCode: 200,
+                headers: ["ETag": "\"\(saveHash)\""],
+                body: corruptedSave
+            )
+        }
+        do {
+            _ = try await client.downloadStreamData(objectID: "save-v1")
+            XCTFail("Expected hashMismatch")
+        } catch let error as LumaVaultError {
+            XCTAssertEqual(
+                error,
+                .hashMismatch(expected: saveHash, actual: Chunker.sha256Hex(of: corruptedSave))
+            )
+        }
+
+        // HTTP 404 with multi-byte UTF-8 body sliced across 4096 bytes decodes cleanly without nil string.
+        let longError = String(repeating: "é", count: 2500) // 5000 UTF-8 bytes, split mid-codepoint at 4096
+        MockURLProtocol.setHandler { _, _ in
+            MockResponse(statusCode: 404, body: Data(longError.utf8))
+        }
+        do {
+            _ = try await client.downloadStreamData(objectID: "save-missing")
+            XCTFail("Expected 404 httpError")
+        } catch let error as LumaVaultError {
+            guard case .httpError(let status, let message) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(status, 404)
+            XCTAssertFalse(message.isEmpty)
+        }
 
         // Declared Content-Length exceeding maxBytes fast-fails with payloadTooLarge.
         MockURLProtocol.setHandler { _, _ in
@@ -334,9 +410,9 @@ final class DataPlaneClientTests: XCTestCase {
     }
 }
 
-// MARK: - MockURLProtocol
+// MARK: - MockURLProtocol (internal for reuse across LumaVaultSDKTests)
 
-private struct MockResponse: Sendable {
+struct MockResponse: Sendable {
     let statusCode: Int
     let headers: [String: String]
     let body: Data
@@ -348,7 +424,7 @@ private struct MockResponse: Sendable {
     }
 }
 
-private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+final class MockURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest, Data) throws -> MockResponse
 
     private final class State: @unchecked Sendable {
