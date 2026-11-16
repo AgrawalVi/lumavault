@@ -1,0 +1,105 @@
+{
+  "pattern": "Byte at offset i has value i mod 251.",
+  "chunkSizeRule": [
+    {
+      "sizeBytes": 1,
+      "chunkSizeBytes": 4194304
+    },
+    {
+      "sizeBytes": 1073741824,
+      "chunkSizeBytes": 4194304
+    },
+    {
+      "sizeBytes": 1073741825,
+      "chunkSizeBytes": 8388608
+    },
+    {
+      "sizeBytes": 2147483648,
+      "chunkSizeBytes": 8388608
+    },
+    {
+      "sizeBytes": 2147483649,
+      "chunkSizeBytes": 16777216
+    },
+    {
+      "sizeBytes": 4294967296,
+      "chunkSizeBytes": 16777216
+    },
+    {
+      "sizeBytes": 4294967297,
+      "chunkSizeBytes": 33554432
+    },
+    {
+      "sizeBytes": 8589934592,
+      "chunkSizeBytes": 33554432
+    },
+    {
+      "sizeBytes": 8589934593,
+      "chunkSizeBytes": 67108864
+    },
+    {
+      "sizeBytes": 107374182400,
+      "chunkSizeBytes": 67108864
+    }
+  ],
+  "files": [
+    {
+      "name": "one byte",
+      "sizeBytes": 1,
+      "chunkSizeBytes": 4194304,
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "chunkHashes": [
+        "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      ]
+    },
+    {
+      "name": "smaller than one chunk",
+      "sizeBytes": 1000,
+      "chunkSizeBytes": 4194304,
+      "sha256": "4e4c294b331f7a2099a379bec34b9f9fc03dc46ab465d998f4d683da53487e6d",
+      "chunkHashes": [
+        "4e4c294b331f7a2099a379bec34b9f9fc03dc46ab465d998f4d683da53487e6d"
+      ]
+    },
+    {
+      "name": "exactly one chunk",
+      "sizeBytes": 4194304,
+      "chunkSizeBytes": 4194304,
+      "sha256": "a117210941a0b00dcb2d8577e680d84b6fa0eaf760d2afc654c953b9859d54fa",
+      "chunkHashes": [
+        "a117210941a0b00dcb2d8577e680d84b6fa0eaf760d2afc654c953b9859d54fa"
+      ]
+    },
+    {
+      "name": "one chunk plus one byte",
+      "sizeBytes": 4194305,
+      "chunkSizeBytes": 4194304,
+      "sha256": "f4711f6bc42a8dc6520e30e306743855a82c7bdecd6e7d3edfb04b6f4524f7bd",
+      "chunkHashes": [
+        "a117210941a0b00dcb2d8577e680d84b6fa0eaf760d2afc654c953b9859d54fa",
+        "74cd9ef9c7e15f57bdad73c511462ca65cb674c46c49639c60f1b44650fa1dcb"
+      ]
+    },
+    {
+      "name": "exactly two chunks",
+      "sizeBytes": 8388608,
+      "chunkSizeBytes": 4194304,
+      "sha256": "bdf23837181f5808331800c1ae2b4f7d7a839536b10d58491471c50dde23833a",
+      "chunkHashes": [
+        "a117210941a0b00dcb2d8577e680d84b6fa0eaf760d2afc654c953b9859d54fa",
+        "9889e2ef8bd7d8fea5ef99243b7784ecd8deaf613bdb7a6c0b3ac56f23078303"
+      ]
+    },
+    {
+      "name": "three chunks minus one byte",
+      "sizeBytes": 12582911,
+      "chunkSizeBytes": 4194304,
+      "sha256": "e014bbf0470cbca010ba56370a235a85e7afddc5299915d320518a0256fe2a77",
+      "chunkHashes": [
+        "a117210941a0b00dcb2d8577e680d84b6fa0eaf760d2afc654c953b9859d54fa",
+        "9889e2ef8bd7d8fea5ef99243b7784ecd8deaf613bdb7a6c0b3ac56f23078303",
+        "4f3df6b3122a3f4bfd21d295b4bd6aaba36a8d906d9c70c998f0c054b98c3282"
+      ]
+    }
+  ]
+}

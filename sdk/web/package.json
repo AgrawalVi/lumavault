@@ -15,15 +15,22 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.build.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0",
     "@connectrpc/connect": "^2.0.0",
-    "@connectrpc/connect-web": "^2.0.0"
+    "@connectrpc/connect-web": "^2.0.0",
+    "hash-wasm": "^4.13.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "@types/node": "^22.20.0",
+    "typescript": "^5.7.0",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
