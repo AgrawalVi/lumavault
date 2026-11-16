@@ -42,10 +42,11 @@ jobs:
           go test -race ./...
           go build -o bin/lumavault ./cmd/lumavault
 
-      - name: Web SDK typecheck and build
+      - name: Web SDK typecheck, test, and build
         run: |
           npm --prefix sdk/web install --no-package-lock
           npm --prefix sdk/web run typecheck
+          npm --prefix sdk/web test
           npm --prefix sdk/web run build
 
   swift:
