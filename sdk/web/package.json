@@ -15,8 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "node -e \"fs.rmSync('.build',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --enable-source-maps --test .build/test-dist"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0",
@@ -24,6 +25,7 @@
     "@connectrpc/connect-web": "^2.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   }
 }
