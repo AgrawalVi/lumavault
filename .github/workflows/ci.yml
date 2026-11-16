@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-go@v5
         with:
@@ -53,6 +55,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate Protobuf stubs
         run: buf generate
