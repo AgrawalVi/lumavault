@@ -176,6 +176,7 @@ lumavault/
 │   └── lumavault/main.go             # Storage Server binary entrypoint
 ├── pkg/
 │   ├── constants/                    # Shared storage invariants (chunk size, SHA-256 hex length)
+│   ├── validate/                     # Shared request checks (SHA-256 digests, namespaces, object IDs, commit manifests)
 │   ├── metadata/                     # MetadataStore interface + deterministic Engine + LocalMetadataStore
 │   ├── chunkstore/                   # ChunkStore interface + Day-1 LocalChunkStore (SHA-256)
 │   ├── gateway/                      # Connect-RPC Control Plane + HTTP Data Plane (PUT/GET chunks & HTTP 206)

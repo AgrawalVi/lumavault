@@ -13,6 +13,7 @@ import (
 	"time"
 
 	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
+	"github.com/lumavault/lumavault/pkg/validate"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -138,7 +139,7 @@ func (s *LocalMetadataStore) UpdateObjectMetadata(ctx context.Context, req *luma
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if req == nil || req.Object == nil || !isSafeObjectID(req.Object.Id) {
+	if req == nil || req.Object == nil || validate.ObjectID(req.Object.Id) != nil {
 		return nil, fmt.Errorf("%w: object and valid object.id are required", ErrInvalidArgument)
 	}
 
@@ -171,7 +172,7 @@ func (s *LocalMetadataStore) DeleteObject(ctx context.Context, objectID string) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !isSafeObjectID(objectID) {
+	if validate.ObjectID(objectID) != nil {
 		return fmt.Errorf("%w: invalid object_id %q", ErrInvalidArgument, objectID)
 	}
 
@@ -225,7 +226,7 @@ func (s *LocalMetadataStore) loadFromDisk() error {
 		if err := proto.Unmarshal(raw, obj); err != nil {
 			return fmt.Errorf("metadata: unmarshal object file %s: %w", entry.Name(), err)
 		}
-		if obj.Id != expectedID || !isSafeObjectID(obj.Id) {
+		if obj.Id != expectedID || validate.ObjectID(obj.Id) != nil {
 			return fmt.Errorf("metadata: object file %s has mismatched or unsafe id %q", entry.Name(), obj.Id)
 		}
 		objects = append(objects, obj)
@@ -241,7 +242,7 @@ func (s *LocalMetadataStore) objectFilePath(objectID string) string {
 
 // writeObjectFile marshals obj to binary Protobuf and writes it atomically to <objectsDir>/<id>.pb.
 func (s *LocalMetadataStore) writeObjectFile(obj *lumavaultv1.ObjectMetadata) error {
-	if !isSafeObjectID(obj.Id) {
+	if validate.ObjectID(obj.Id) != nil {
 		return fmt.Errorf("%w: unsafe object_id %q", ErrInvalidArgument, obj.Id)
 	}
 	raw, err := proto.Marshal(obj)

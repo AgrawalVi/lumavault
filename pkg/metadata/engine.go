@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
-	"github.com/lumavault/lumavault/pkg/constants"
+	"github.com/lumavault/lumavault/pkg/validate"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -56,7 +55,7 @@ func (e *Engine) Restore(objects []*lumavaultv1.ObjectMetadata) error {
 	sorted := make([]*lumavaultv1.ObjectMetadata, len(objects))
 	seenIDs := make(map[string]struct{}, len(objects))
 	for i, obj := range objects {
-		if obj == nil || !isSafeObjectID(obj.Id) {
+		if obj == nil || validate.ObjectID(obj.Id) != nil {
 			return fmt.Errorf("%w: cannot restore nil or invalid-ID object", ErrInvalidArgument)
 		}
 		if _, dup := seenIDs[obj.Id]; dup {
@@ -94,10 +93,10 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 	if req == nil {
 		return nil, false, fmt.Errorf("%w: request is nil", ErrInvalidArgument)
 	}
-	if !isSafeObjectID(objectID) {
+	if validate.ObjectID(objectID) != nil {
 		return nil, false, fmt.Errorf("%w: invalid objectID %q", ErrInvalidArgument, objectID)
 	}
-	if err := validateCommitRequest(req); err != nil {
+	if err := invalidArg(validate.CommitRequest(req)); err != nil {
 		return nil, false, err
 	}
 
@@ -136,7 +135,7 @@ func (e *Engine) CommitObject(req *lumavaultv1.CommitObjectRequest, objectID str
 
 // GetObject retrieves a deep-cloned ObjectMetadata by ID, or returns ErrObjectNotFound.
 func (e *Engine) GetObject(objectID string) (*lumavaultv1.ObjectMetadata, error) {
-	if !isSafeObjectID(objectID) {
+	if validate.ObjectID(objectID) != nil {
 		return nil, fmt.Errorf("%w: invalid object_id %q", ErrInvalidArgument, objectID)
 	}
 	obj, ok := e.objects[objectID]
@@ -151,7 +150,7 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 	if req == nil {
 		return nil, fmt.Errorf("%w: request is nil", ErrInvalidArgument)
 	}
-	if !isValidNamespace(req.Namespace) {
+	if validate.Namespace(req.Namespace) != nil {
 		return nil, fmt.Errorf("%w: valid namespace is required", ErrInvalidArgument)
 	}
 	if req.PageSize < 0 {
@@ -220,7 +219,7 @@ func (e *Engine) ListObjects(req *lumavaultv1.ListObjectsRequest) (*lumavaultv1.
 // UpdateObjectMetadata applies a partial update to mutable storage-level metadata fields
 // (filename, mime_type, thumbnail_chunk_hash) using req.UpdateMask.
 func (e *Engine) UpdateObjectMetadata(req *lumavaultv1.UpdateObjectMetadataRequest, now time.Time) (*lumavaultv1.ObjectMetadata, error) {
-	if req == nil || req.Object == nil || !isSafeObjectID(req.Object.Id) {
+	if req == nil || req.Object == nil || validate.ObjectID(req.Object.Id) != nil {
 		return nil, fmt.Errorf("%w: object and valid object.id are required", ErrInvalidArgument)
 	}
 	if req.UpdateMask == nil || len(req.UpdateMask.Paths) == 0 {
@@ -255,7 +254,7 @@ func (e *Engine) UpdateObjectMetadata(req *lumavaultv1.UpdateObjectMetadataReque
 
 // DeleteObject removes objectID from the Engine and updates deduplication and chunk reference indexes.
 func (e *Engine) DeleteObject(objectID string) error {
-	if !isSafeObjectID(objectID) {
+	if validate.ObjectID(objectID) != nil {
 		return fmt.Errorf("%w: invalid object_id %q", ErrInvalidArgument, objectID)
 	}
 	existing, ok := e.objects[objectID]
@@ -279,7 +278,7 @@ func (e *Engine) DeleteObject(objectID string) error {
 
 // IsChunkReferenced reports whether hash is a valid SHA-256 digest currently referenced by at least one object.
 func (e *Engine) IsChunkReferenced(hash string) (bool, error) {
-	if err := ValidateHash(hash); err != nil {
+	if err := invalidArg(validate.Hash(hash)); err != nil {
 		return false, err
 	}
 	return e.chunkRefs[hash] > 0, nil
@@ -294,7 +293,7 @@ func (e *Engine) hasObject(objectID string) bool {
 // putObjectDirect restores a previously committed object record in place and reconciles its
 // chunk reference counts when rolling back a failed disk write during UpdateObjectMetadata.
 func (e *Engine) putObjectDirect(obj *lumavaultv1.ObjectMetadata) {
-	if obj == nil || !isSafeObjectID(obj.Id) {
+	if obj == nil || validate.ObjectID(obj.Id) != nil {
 		return
 	}
 	cloned := cloneObject(obj)
@@ -337,48 +336,6 @@ func adjustChunkRefsMap(refs map[string]int, obj *lumavaultv1.ObjectMetadata, de
 	}
 }
 
-// validateCommitRequest validates namespace, SHA-256 digests, chunk size bounds, and chunk count math.
-func validateCommitRequest(req *lumavaultv1.CommitObjectRequest) error {
-	if !isValidNamespace(req.Namespace) {
-		return fmt.Errorf("%w: invalid or unspecified namespace %v", ErrInvalidArgument, req.Namespace)
-	}
-
-	if err := ValidateHash(req.Sha256Digest); err != nil {
-		return fmt.Errorf("sha256_digest: %w", err)
-	}
-	if req.ThumbnailChunkHash != "" {
-		if err := ValidateHash(req.ThumbnailChunkHash); err != nil {
-			return fmt.Errorf("thumbnail_chunk_hash: %w", err)
-		}
-	}
-	for i, h := range req.ChunkHashes {
-		if err := ValidateHash(h); err != nil {
-			return fmt.Errorf("chunk_hashes[%d]: %w", i, err)
-		}
-	}
-
-	if req.ChunkSizeBytes > constants.MaxChunkSizeBytes {
-		return fmt.Errorf("%w: chunk_size_bytes (%d) exceeds max (%d)", ErrInvalidArgument, req.ChunkSizeBytes, constants.MaxChunkSizeBytes)
-	}
-
-	if req.SizeBytes == 0 {
-		if len(req.ChunkHashes) != 0 {
-			return fmt.Errorf("%w: size_bytes is 0 but len(chunk_hashes) is %d", ErrInvalidArgument, len(req.ChunkHashes))
-		}
-	} else {
-		if req.ChunkSizeBytes == 0 {
-			return fmt.Errorf("%w: chunk_size_bytes must be > 0 when size_bytes > 0", ErrInvalidArgument)
-		}
-		expectedChunks := 1 + (req.SizeBytes-1)/uint64(req.ChunkSizeBytes)
-		if uint64(len(req.ChunkHashes)) != expectedChunks {
-			return fmt.Errorf("%w: len(chunk_hashes)=%d does not match ceil(size_bytes=%d / chunk_size_bytes=%d)=%d",
-				ErrInvalidArgument, len(req.ChunkHashes), req.SizeBytes, req.ChunkSizeBytes, expectedChunks)
-		}
-	}
-
-	return nil
-}
-
 // applyFieldMaskPath copies a single mutable FieldMask field from src onto updated.
 func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) error {
 	switch path {
@@ -388,7 +345,7 @@ func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) e
 		updated.MimeType = src.MimeType
 	case "thumbnail_chunk_hash":
 		if src.ThumbnailChunkHash != "" {
-			if err := ValidateHash(src.ThumbnailChunkHash); err != nil {
+			if err := invalidArg(validate.Hash(src.ThumbnailChunkHash)); err != nil {
 				return fmt.Errorf("thumbnail_chunk_hash: %w", err)
 			}
 		}
@@ -397,28 +354,6 @@ func applyFieldMaskPath(updated, src *lumavaultv1.ObjectMetadata, path string) e
 		return fmt.Errorf("%w: unsupported or immutable update_mask path %q", ErrInvalidArgument, path)
 	}
 	return nil
-}
-
-// isValidNamespace reports whether ns is a defined, non-unspecified LumaVault namespace.
-func isValidNamespace(ns lumavaultv1.Namespace) bool {
-	switch ns {
-	case lumavaultv1.Namespace_NAMESPACE_PHOTOS,
-		lumavaultv1.Namespace_NAMESPACE_CINEMA,
-		lumavaultv1.Namespace_NAMESPACE_GAMES:
-		return true
-	default:
-		return false
-	}
-}
-
-// isSafeObjectID rejects empty IDs, relative path segments ("." and ".."), and path
-// separators ('/' and '\') so an objectID can never traverse outside <rootDir>/objects/
-// when mapped to <id>.pb on disk.
-func isSafeObjectID(id string) bool {
-	if id == "" || id == "." || id == ".." {
-		return false
-	}
-	return !strings.ContainsAny(id, `/\`)
 }
 
 // compareObjectsAsc orders objects oldest-first by (CreatedAt ASC, Id ASC).
