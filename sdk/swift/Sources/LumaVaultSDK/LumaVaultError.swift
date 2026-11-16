@@ -4,6 +4,7 @@ import Foundation
 /// Errors thrown by the LumaVault Swift SDK across chunk planning, HTTP data plane transfers,
 /// and Connect-RPC control plane calls.
 public enum LumaVaultError: Error, Sendable, Equatable, LocalizedError {
+    case invalidArgument(String)
     case invalidNamespace(Lumavault_V1_Namespace)
     case invalidChunkSize(Int)
     case invalidHash(String)
@@ -16,6 +17,8 @@ public enum LumaVaultError: Error, Sendable, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
+        case .invalidArgument(let detail):
+            return "Invalid argument: \(detail)"
         case .invalidNamespace(let namespace):
             return "Invalid LumaVault namespace: \(namespace)"
         case .invalidChunkSize(let size):

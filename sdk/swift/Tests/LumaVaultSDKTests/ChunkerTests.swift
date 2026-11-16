@@ -1,5 +1,6 @@
 import Connect
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import LumaVaultSDK
@@ -147,7 +148,10 @@ final class ChunkerTests: XCTestCase {
         let fileURL = tempDirectory.appendingPathComponent("multi-10.5mib.bin")
         try payload.write(to: fileURL)
 
-        let filePlan = try Chunker.planFile(at: fileURL, chunkSizeBytes: Chunker.minChunkSizeBytes)
+        var progressReports = 0
+        let filePlan = try Chunker.planFile(at: fileURL, chunkSizeBytes: Chunker.minChunkSizeBytes) { _, _ in
+            progressReports += 1
+        }
         let dataPlan = try Chunker.planData(payload, chunkSizeBytes: Chunker.minChunkSizeBytes)
 
         XCTAssertEqual(filePlan, dataPlan)
@@ -160,6 +164,8 @@ final class ChunkerTests: XCTestCase {
         XCTAssertEqual(filePlan.chunks[1].length, 4 * 1024 * 1024)
         XCTAssertEqual(filePlan.chunks[2].offset, UInt64(8 * 1024 * 1024))
         XCTAssertEqual(filePlan.chunks[2].length, 2 * 1024 * 1024 + 512 * 1024)
+        // Progress is throttled to ~1 MiB steps + chunk boundaries + EOF instead of 336 x 32 KiB calls.
+        XCTAssertLessThanOrEqual(progressReports, 16)
 
         for chunk in filePlan.chunks {
             let bytes = try Chunker.readChunk(from: fileURL, chunk: chunk)
@@ -174,12 +180,44 @@ final class ChunkerTests: XCTestCase {
         XCTAssertEqual(unalignedFilePlan, unalignedDataPlan)
     }
 
-    func testReadChunkPastEOFThrowsAndTaskCancellationPropagates() async throws {
-        let payload = Data("short".utf8)
-        let fileURL = tempDirectory.appendingPathComponent("short.bin")
+    func testDirectoryRejectionMutationDetectionOverflowGuardAndCancellation() async throws {
+        // Directory URLs (both trailing-slash and non-trailing-slash) must be rejected as non-regular files.
+        for dirURL in [tempDirectory!, URL(fileURLWithPath: tempDirectory.path, isDirectory: false)] {
+            XCTAssertThrowsError(try Chunker.planFile(at: dirURL)) { error in
+                guard case .invalidArgument = error as? LumaVaultError else {
+                    return XCTFail("Expected invalidArgument, got \(error)")
+                }
+            }
+        }
+
+        let payload = Data("save-slot-v1".utf8)
+        let fileURL = tempDirectory.appendingPathComponent("slot.sav")
         try payload.write(to: fileURL)
 
-        XCTAssertThrowsError(try Chunker.readChunk(from: fileURL, offset: 0, length: 16))
+        let plan = try Chunker.planFile(at: fileURL)
+        // Mutate file bytes on disk after planning -> readChunk(from:chunk:) catches hash mismatch.
+        let mutated = Data("save-slot-v2".utf8)
+        try mutated.write(to: fileURL)
+        XCTAssertThrowsError(try Chunker.readChunk(from: fileURL, chunk: plan.chunks[0])) { error in
+            XCTAssertEqual(
+                error as? LumaVaultError,
+                .hashMismatch(
+                    expected: plan.chunks[0].hash,
+                    actual: Chunker.sha256Hex(of: mutated)
+                )
+            )
+        }
+
+        XCTAssertThrowsError(try Chunker.readChunk(from: fileURL, offset: 0, length: 64))
+
+        // Overflow-safe bounds check in sliceData when offset + length would overflow Int.
+        let hugeOffsetChunk = ChunkDescriptor(
+            index: 0,
+            hash: plan.chunks[0].hash,
+            offset: UInt64(Int.max),
+            length: 16
+        )
+        XCTAssertThrowsError(try Chunker.sliceData(payload, chunk: hugeOffsetChunk))
 
         let cancelledTask = Task {
             withUnsafeCurrentTask { $0?.cancel() }

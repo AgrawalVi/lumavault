@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Raw HTTP Data Plane client (`PUT/GET /v1/chunks/{sha256}` and `GET /v1/stream/{object_id}`)
@@ -13,16 +14,44 @@ public struct DataPlaneClient: Sendable {
         return allowed
     }()
 
+    private final class SessionOwner: Sendable {
+        let session: URLSession
+        init(_ session: URLSession) {
+            self.session = session
+        }
+        deinit {
+            session.finishTasksAndInvalidate()
+        }
+    }
+
     public let baseURL: URL
     private let session: URLSession
+    private let sessionOwner: SessionOwner?
 
     public init(baseURL: URL, session: URLSession) {
         self.baseURL = baseURL
         self.session = session
+        self.sessionOwner = nil
     }
 
     public init(baseURL: URL, configuration: URLSessionConfiguration = .default) {
-        self.init(baseURL: baseURL, session: URLSession(configuration: configuration))
+        let owned = URLSession(configuration: configuration)
+        self.baseURL = baseURL
+        self.session = owned
+        self.sessionOwner = SessionOwner(owned)
+    }
+
+    /// Validates that `objectID` is non-empty, not a dot path segment (`.` / `..`),
+    /// and contains no ASCII control characters.
+    public static func validateObjectID(_ objectID: String) throws {
+        guard !objectID.isEmpty,
+              objectID != ".",
+              objectID != "..",
+              !objectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !objectID.utf8.contains(where: { $0 < 0x20 || $0 == 0x7F })
+        else {
+            throw LumaVaultError.invalidArgument("Invalid object ID: \(objectID)")
+        }
     }
 
     /// Builds `${baseURL}/v1/stream/${objectID}` for `AVPlayer` `HTTP 206` byte-range streaming.
@@ -68,46 +97,33 @@ public struct DataPlaneClient: Sendable {
         }
     }
 
-    /// Downloads a single chunk via `GET /v1/chunks/{sha256}` and verifies its `SHA-256` digest by default.
+    /// Downloads a single chunk via `GET /v1/chunks/{sha256}`, streaming with a `64 MiB` cap
+    /// and verifying its `SHA-256` digest by default.
     public func getChunk(hash: String, verifyHash: Bool = true) async throws -> Data {
         try Task.checkCancellation()
         try Chunker.validateHash(hash)
 
-        var request = URLRequest(url: chunkURL(forHash: hash))
-        request.httpMethod = "GET"
-
-        let (data, response) = try await session.data(for: request)
-        let httpResponse = try requireHTTPResponse(response)
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw LumaVaultError.httpError(
-                statusCode: httpResponse.statusCode,
-                message: Self.decodeErrorMessage(from: data)
-            )
-        }
-        if data.count > Chunker.maxChunkSizeBytes {
-            throw LumaVaultError.payloadTooLarge(
-                sizeBytes: Int64(data.count),
-                maxBytes: Int64(Chunker.maxChunkSizeBytes)
-            )
-        }
-        if verifyHash {
-            let actualHash = Chunker.sha256Hex(of: data)
-            guard actualHash == hash else {
-                throw LumaVaultError.hashMismatch(expected: hash, actual: actualHash)
-            }
-        }
-        return data
+        return try await streamBoundedBytes(
+            url: chunkURL(forHash: hash),
+            maxBytes: Int64(Chunker.maxChunkSizeBytes),
+            expectedSHA256: verifyHash ? hash : nil,
+            requireVerification: verifyHash
+        )
     }
 
     /// Streams `GET /v1/stream/{object_id}` to disk via `URLSession.download`, verifies `SHA-256`
     /// in `32 KiB` `autoreleasepool` blocks (against `expectedSHA256` or a quote-stripped strong `ETag`),
-    /// and atomically replaces `destinationURL`. Always cleans up temporary files on error or cancellation.
+    /// and atomically replaces `destinationURL` (including across volumes). Always cleans up temporary files.
     public func downloadStreamToFile(
         objectID: String,
         to destinationURL: URL,
         expectedSHA256: String? = nil
     ) async throws {
         try Task.checkCancellation()
+        try Self.validateObjectID(objectID)
+        guard destinationURL.isFileURL, !destinationURL.hasDirectoryPath else {
+            throw LumaVaultError.invalidArgument("Destination must be a file URL: \(destinationURL)")
+        }
         if let expectedSHA256 {
             try Chunker.validateHash(expectedSHA256)
         }
@@ -121,7 +137,7 @@ public struct DataPlaneClient: Sendable {
         }
 
         let httpResponse = try requireHTTPResponse(response)
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard httpResponse.statusCode == 200 else {
             let errorSnippet = Self.readErrorSnippet(at: tempURL)
             throw LumaVaultError.httpError(
                 statusCode: httpResponse.statusCode,
@@ -138,13 +154,32 @@ public struct DataPlaneClient: Sendable {
             throw LumaVaultError.hashMismatch(expected: expectedHash, actual: actualHash)
         }
 
+        let fileManager = FileManager.default
         let destinationDir = destinationURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
-        _ = try FileManager.default.replaceItemAt(
+        try fileManager.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+
+        let replacementDir = try fileManager.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: destinationDir,
+            create: true
+        )
+        defer {
+            try? fileManager.removeItem(at: replacementDir)
+        }
+
+        let stagedURL = replacementDir.appendingPathComponent(destinationURL.lastPathComponent)
+        try fileManager.moveItem(at: tempURL, to: stagedURL)
+        _ = stagedURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(0) }
+            return Darwin.chmod(path, mode_t(0o644))
+        }
+
+        _ = try fileManager.replaceItemAt(
             destinationURL,
-            withItemAt: tempURL,
+            withItemAt: stagedURL,
             backupItemName: nil,
-            options: .usingNewMetadataOnly
+            options: []
         )
     }
 
@@ -156,27 +191,50 @@ public struct DataPlaneClient: Sendable {
         maxBytes: Int64 = defaultMaxDownloadBytes
     ) async throws -> Data {
         try Task.checkCancellation()
+        try Self.validateObjectID(objectID)
         if let expectedSHA256 {
             try Chunker.validateHash(expectedSHA256)
         }
+
+        return try await streamBoundedBytes(
+            url: streamURL(forObjectID: objectID),
+            maxBytes: maxBytes,
+            expectedSHA256: expectedSHA256,
+            requireVerification: true
+        )
+    }
+
+    // MARK: - Private Helpers
+
+    private func streamBoundedBytes(
+        url: URL,
+        maxBytes: Int64,
+        expectedSHA256: String?,
+        requireVerification: Bool
+    ) async throws -> Data {
         guard maxBytes >= 0 else {
             throw LumaVaultError.payloadTooLarge(sizeBytes: 0, maxBytes: maxBytes)
         }
 
-        var request = URLRequest(url: streamURL(forObjectID: objectID))
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
 
         let (asyncBytes, response) = try await session.bytes(for: request)
+        defer {
+            asyncBytes.task.cancel()
+        }
+        try Task.checkCancellation()
+
         let httpResponse = try requireHTTPResponse(response)
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard httpResponse.statusCode == 200 else {
             let message = try await Self.readErrorMessage(from: asyncBytes)
             throw LumaVaultError.httpError(statusCode: httpResponse.statusCode, message: message)
         }
 
-        let expectedHash = try Self.resolveExpectedSHA256(
-            explicit: expectedSHA256,
-            response: httpResponse
-        )
+        let expectedHash: String? = requireVerification
+            ? try Self.resolveExpectedSHA256(explicit: expectedSHA256, response: httpResponse)
+            : nil
+
         if httpResponse.expectedContentLength > maxBytes {
             throw LumaVaultError.payloadTooLarge(
                 sizeBytes: httpResponse.expectedContentLength,
@@ -185,11 +243,12 @@ public struct DataPlaneClient: Sendable {
         }
 
         var result = Data()
-        if httpResponse.expectedContentLength > 0, httpResponse.expectedContentLength <= maxBytes {
-            result.reserveCapacity(Int(httpResponse.expectedContentLength))
+        if httpResponse.expectedContentLength > 0 {
+            let cappedReserve = min(httpResponse.expectedContentLength, Int64(Chunker.minChunkSizeBytes))
+            result.reserveCapacity(Int(cappedReserve))
         }
 
-        var hasher = SHA256()
+        var hasher = expectedHash != nil ? SHA256() : nil
         var scratch = [UInt8]()
         scratch.reserveCapacity(Chunker.streamBufferSizeBytes)
         var totalBytes: Int64 = 0
@@ -202,24 +261,25 @@ public struct DataPlaneClient: Sendable {
             scratch.append(byte)
             if scratch.count == Chunker.streamBufferSizeBytes {
                 try Task.checkCancellation()
-                hasher.update(data: scratch)
+                hasher?.update(data: scratch)
                 result.append(contentsOf: scratch)
                 scratch.removeAll(keepingCapacity: true)
             }
         }
+        try Task.checkCancellation()
         if !scratch.isEmpty {
-            hasher.update(data: scratch)
+            hasher?.update(data: scratch)
             result.append(contentsOf: scratch)
         }
 
-        let actualHash = Chunker.hexString(hasher.finalize())
-        guard actualHash == expectedHash else {
-            throw LumaVaultError.hashMismatch(expected: expectedHash, actual: actualHash)
+        if let expectedHash, let hasher {
+            let actualHash = Chunker.hexString(hasher.finalize())
+            guard actualHash == expectedHash else {
+                throw LumaVaultError.hashMismatch(expected: expectedHash, actual: actualHash)
+            }
         }
         return result
     }
-
-    // MARK: - Private Helpers
 
     private func endpointURL(subpath: String, segment: String) -> URL {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: true) else {
@@ -229,7 +289,17 @@ public struct DataPlaneClient: Sendable {
         while basePath.hasSuffix("/") {
             basePath.removeLast()
         }
-        let encodedSegment = segment.addingPercentEncoding(withAllowedCharacters: Self.singleSegmentAllowed) ?? segment
+        let encodedSegment: String
+        if segment == "." {
+            encodedSegment = "%2E"
+        } else if segment == ".." {
+            encodedSegment = "%2E%2E"
+        } else {
+            guard let escaped = segment.addingPercentEncoding(withAllowedCharacters: Self.singleSegmentAllowed) else {
+                return baseURL
+            }
+            encodedSegment = escaped
+        }
         components.percentEncodedPath = "\(basePath)\(subpath)/\(encodedSegment)"
         components.percentEncodedQuery = nil
         components.percentEncodedFragment = nil
@@ -258,15 +328,10 @@ public struct DataPlaneClient: Sendable {
         if rawETag.hasPrefix("W/") || rawETag.hasPrefix("w/") {
             throw LumaVaultError.invalidResponse("Weak ETag header cannot verify SHA-256: \(rawETag)")
         }
-        let unquoted: String
-        if rawETag.hasPrefix("\"") || rawETag.hasSuffix("\"") {
-            guard rawETag.count >= 2, rawETag.hasPrefix("\""), rawETag.hasSuffix("\"") else {
-                throw LumaVaultError.invalidResponse("Malformed ETag header: \(rawETag)")
-            }
-            unquoted = String(rawETag.dropFirst().dropLast())
-        } else {
-            unquoted = rawETag
+        guard rawETag.count >= 2, rawETag.first == "\"", rawETag.last == "\"" else {
+            throw LumaVaultError.invalidResponse("Malformed strong ETag header: \(rawETag)")
         }
+        let unquoted = String(rawETag.dropFirst().dropLast())
         do {
             try Chunker.validateHash(unquoted)
         } catch {
@@ -276,8 +341,8 @@ public struct DataPlaneClient: Sendable {
     }
 
     private static func decodeErrorMessage(from data: Data) -> String {
-        String(data: data.prefix(4096), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        String(decoding: data.prefix(4096), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func readErrorSnippet(at fileURL: URL) -> String {
@@ -299,6 +364,7 @@ public struct DataPlaneClient: Sendable {
                 break
             }
         }
-        return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        try Task.checkCancellation()
+        return decodeErrorMessage(from: Data(bytes))
     }
 }
