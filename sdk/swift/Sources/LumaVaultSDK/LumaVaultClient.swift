@@ -21,6 +21,18 @@ public struct UploadResult: Sendable, Equatable {
     }
 }
 
+/// Internal seam over `DataPlaneClient` enabling deterministic unit tests without global `URLProtocol` state.
+internal protocol DataPlaneTransport: Sendable {
+    func streamURL(forObjectID objectID: String) -> URL
+    func chunkURL(forHash hash: String) -> URL
+    func putChunk(data: Data, hash: String) async throws
+    func getChunk(hash: String, verifyHash: Bool) async throws -> Data
+    func downloadStreamToFile(objectID: String, to destinationURL: URL, expectedSHA256: String?) async throws
+    func downloadStreamData(objectID: String, expectedSHA256: String?, maxBytes: Int64) async throws -> Data
+}
+
+extension DataPlaneClient: DataPlaneTransport {}
+
 /// Top-level `Sendable` client combining Connect-RPC (`StorageService`) control plane calls
 /// and `URLSession` (`DataPlaneClient`) streaming chunk transfers.
 public final class LumaVaultClient: Sendable {
@@ -28,23 +40,41 @@ public final class LumaVaultClient: Sendable {
     public static let defaultMaxConcurrentUploads = 2
 
     public let baseURL: URL
-    public let dataPlane: DataPlaneClient
     private let storageClient: any Lumavault_V1_StorageServiceClientInterface
+    private let transport: any DataPlaneTransport
 
-    public init(
+    internal init(
         baseURL: URL,
         storageClient: any Lumavault_V1_StorageServiceClientInterface,
-        dataPlane: DataPlaneClient
+        transport: any DataPlaneTransport
     ) {
         self.baseURL = baseURL
         self.storageClient = storageClient
-        self.dataPlane = dataPlane
+        self.transport = transport
     }
 
     public convenience init(
         baseURL: URL,
+        storageClient: any Lumavault_V1_StorageServiceClientInterface,
+        dataPlane: DataPlaneClient
+    ) {
+        self.init(
+            baseURL: baseURL,
+            storageClient: storageClient,
+            transport: dataPlane
+        )
+    }
+
+    /// Initializes a client sharing `configuration` across Connect-RPC and Data Plane `URLSession`s.
+    /// `configuration` must be standard or ephemeral (background session identifiers are unsupported).
+    public convenience init(
+        baseURL: URL,
         configuration: URLSessionConfiguration = .default
     ) {
+        precondition(
+            configuration.identifier == nil,
+            "Background URLSessionConfiguration is not supported by LumaVaultClient(baseURL:configuration:)"
+        )
         let httpClient = URLSessionHTTPClient(configuration: configuration)
         let config = ProtocolClientConfig(
             host: Self.normalizedHost(from: baseURL),
@@ -57,7 +87,7 @@ public final class LumaVaultClient: Sendable {
         self.init(
             baseURL: baseURL,
             storageClient: storageClient,
-            dataPlane: dataPlane
+            transport: dataPlane
         )
     }
 
@@ -74,7 +104,6 @@ public final class LumaVaultClient: Sendable {
         chunkSizeBytes: Int? = nil,
         skipDedup: Bool = false,
         maxConcurrentUploads: Int = defaultMaxConcurrentUploads,
-        headers: Connect.Headers = [:],
         onProgress: (@Sendable (UploadProgress) -> Void)? = nil
     ) async throws -> UploadResult {
         try await executeUpload(
@@ -85,7 +114,6 @@ public final class LumaVaultClient: Sendable {
             chunkSizeBytes: chunkSizeBytes,
             skipDedup: skipDedup,
             maxConcurrentUploads: maxConcurrentUploads,
-            headers: headers,
             onProgress: onProgress,
             makePlan: { chunkSize, onHashProgress in
                 try Chunker.planFile(
@@ -111,7 +139,6 @@ public final class LumaVaultClient: Sendable {
         chunkSizeBytes: Int? = nil,
         skipDedup: Bool = false,
         maxConcurrentUploads: Int = defaultMaxConcurrentUploads,
-        headers: Connect.Headers = [:],
         onProgress: (@Sendable (UploadProgress) -> Void)? = nil
     ) async throws -> UploadResult {
         try await executeUpload(
@@ -122,7 +149,6 @@ public final class LumaVaultClient: Sendable {
             chunkSizeBytes: chunkSizeBytes,
             skipDedup: skipDedup,
             maxConcurrentUploads: maxConcurrentUploads,
-            headers: headers,
             onProgress: onProgress,
             makePlan: { chunkSize, onHashProgress in
                 try Chunker.planData(
@@ -142,7 +168,7 @@ public final class LumaVaultClient: Sendable {
     /// Checks which candidate `SHA-256` chunk hashes are missing in `ChunkStore`.
     public func hasChunks(
         _ chunkHashes: [String],
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws -> [String] {
         try Task.checkCancellation()
         for hash in chunkHashes {
@@ -150,17 +176,24 @@ public final class LumaVaultClient: Sendable {
         }
         var request = Lumavault_V1_HasChunksRequest()
         request.chunkHashes = chunkHashes
-        let response = await storageClient.hasChunks(request: request, headers: headers)
+        let response = await storageClient.hasChunks(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         return try unwrap(response).missingChunkHashes
     }
 
     /// Commits an object manifest after all referenced chunks have been uploaded.
     public func commitObject(
         _ request: Lumavault_V1_CommitObjectRequest,
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws -> Lumavault_V1_CommitObjectResponse {
         try Task.checkCancellation()
-        let response = await storageClient.commitObject(request: request, headers: headers)
+        try Self.validateNamespace(request.namespace)
+        let response = await storageClient.commitObject(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         let message = try unwrap(response)
         guard message.hasObject else {
             throw LumaVaultError.invalidResponse("CommitObject response missing object")
@@ -171,12 +204,16 @@ public final class LumaVaultClient: Sendable {
     /// Fetches a single object's metadata and chunk manifest by ID.
     public func getObject(
         objectID: String,
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws -> Lumavault_V1_ObjectMetadata {
         try Task.checkCancellation()
+        try DataPlaneClient.validateObjectID(objectID)
         var request = Lumavault_V1_GetObjectRequest()
         request.objectID = objectID
-        let response = await storageClient.getObject(request: request, headers: headers)
+        let response = await storageClient.getObject(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         let message = try unwrap(response)
         guard message.hasObject else {
             throw LumaVaultError.invalidResponse("GetObject response missing object")
@@ -189,61 +226,39 @@ public final class LumaVaultClient: Sendable {
         namespace: Lumavault_V1_Namespace,
         pageSize: Int32 = 0,
         pageToken: String = "",
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws -> Lumavault_V1_ListObjectsResponse {
         try Task.checkCancellation()
-        _ = try Chunker.defaultChunkSize(for: namespace)
+        try Self.validateNamespace(namespace)
+        guard pageSize >= 0 else {
+            throw LumaVaultError.invalidArgument("pageSize must not be negative: \(pageSize)")
+        }
         var request = Lumavault_V1_ListObjectsRequest()
         request.namespace = namespace
         request.pageSize = pageSize
         request.pageToken = pageToken
-        let response = await storageClient.listObjects(request: request, headers: headers)
+        let response = await storageClient.listObjects(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         return try unwrap(response)
     }
 
-    /// Streams all objects in `namespace` across cursor pages, canceling the producer task on termination.
+    /// Demand-driven `AsyncThrowingStream` over `namespace` that fetches each cursor page only
+    /// after the current page has been consumed.
     public func listAllObjects(
         namespace: Lumavault_V1_Namespace,
         pageSize: Int32 = 0,
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) -> AsyncThrowingStream<Lumavault_V1_ObjectMetadata, Error> {
-        AsyncThrowingStream { continuation in
-            let producer = Task {
-                do {
-                    var pageToken = ""
-                    var seenTokens = Set<String>()
-                    while true {
-                        try Task.checkCancellation()
-                        let page = try await self.listObjects(
-                            namespace: namespace,
-                            pageSize: pageSize,
-                            pageToken: pageToken,
-                            headers: headers
-                        )
-                        for object in page.objects {
-                            try Task.checkCancellation()
-                            if case .terminated = continuation.yield(object) {
-                                return
-                            }
-                        }
-                        if page.nextPageToken.isEmpty {
-                            continuation.finish()
-                            return
-                        }
-                        guard seenTokens.insert(page.nextPageToken).inserted else {
-                            throw LumaVaultError.invalidResponse(
-                                "ListObjects returned repeating next_page_token"
-                            )
-                        }
-                        pageToken = page.nextPageToken
-                    }
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in
-                producer.cancel()
-            }
+        let cursor = ObjectPageCursor(
+            client: self,
+            namespace: namespace,
+            pageSize: pageSize,
+            headers: headers
+        )
+        return AsyncThrowingStream {
+            try await cursor.next()
         }
     }
 
@@ -253,9 +268,10 @@ public final class LumaVaultClient: Sendable {
         filename: String? = nil,
         mimeType: String? = nil,
         thumbnailChunkHash: String? = nil,
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws -> Lumavault_V1_ObjectMetadata {
         try Task.checkCancellation()
+        try DataPlaneClient.validateObjectID(objectID)
         var object = Lumavault_V1_ObjectMetadata()
         object.id = objectID
 
@@ -286,7 +302,10 @@ public final class LumaVaultClient: Sendable {
         request.object = object
         request.updateMask = mask
 
-        let response = await storageClient.updateObjectMetadata(request: request, headers: headers)
+        let response = await storageClient.updateObjectMetadata(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         let message = try unwrap(response)
         guard message.hasObject else {
             throw LumaVaultError.invalidResponse("UpdateObjectMetadata response missing object")
@@ -297,28 +316,43 @@ public final class LumaVaultClient: Sendable {
     /// Deletes an object's metadata record by ID.
     public func deleteObject(
         objectID: String,
-        headers: Connect.Headers = [:]
+        headers: [String: String] = [:]
     ) async throws {
         try Task.checkCancellation()
+        try DataPlaneClient.validateObjectID(objectID)
         var request = Lumavault_V1_DeleteObjectRequest()
         request.objectID = objectID
-        let response = await storageClient.deleteObject(request: request, headers: headers)
+        let response = await storageClient.deleteObject(
+            request: request,
+            headers: Self.connectHeaders(from: headers)
+        )
         _ = try unwrap(response)
     }
 
     // MARK: - Verified Downloads & URL Helpers
 
+    /// Downloads a single immutable chunk or thumbnail by `SHA-256` hash, verifying its digest by default.
+    public func getChunk(hash: String, verifyHash: Bool = true) async throws -> Data {
+        try await runDataPlane {
+            try await transport.getChunk(hash: hash, verifyHash: verifyHash)
+        }
+    }
+
     /// Downloads `object` to `destinationURL`, verifying `SHA-256` against `object.sha256Digest`
-    /// without issuing an extra `GetObject` RPC.
+    /// (or falling back to strong `ETag` when `sha256Digest` is unset) without an extra `GetObject` RPC.
     public func downloadObjectToFile(
         _ object: Lumavault_V1_ObjectMetadata,
         to destinationURL: URL
     ) async throws {
-        try await dataPlane.downloadStreamToFile(
-            objectID: object.id,
-            to: destinationURL,
-            expectedSHA256: object.sha256Digest
-        )
+        try DataPlaneClient.validateObjectID(object.id)
+        let expected = object.sha256Digest.isEmpty ? nil : object.sha256Digest
+        try await runDataPlane {
+            try await transport.downloadStreamToFile(
+                objectID: object.id,
+                to: destinationURL,
+                expectedSHA256: expected
+            )
+        }
     }
 
     /// Downloads `objectID` to `destinationURL`, verifying `SHA-256` against `expectedSHA256`
@@ -328,30 +362,37 @@ public final class LumaVaultClient: Sendable {
         to destinationURL: URL,
         expectedSHA256: String? = nil
     ) async throws {
-        try await dataPlane.downloadStreamToFile(
-            objectID: objectID,
-            to: destinationURL,
-            expectedSHA256: expectedSHA256
-        )
+        try DataPlaneClient.validateObjectID(objectID)
+        try await runDataPlane {
+            try await transport.downloadStreamToFile(
+                objectID: objectID,
+                to: destinationURL,
+                expectedSHA256: expectedSHA256
+            )
+        }
     }
 
     /// Downloads `object` into memory, enforcing `maxBytes` and verifying `object.sha256Digest`
-    /// without issuing an extra `GetObject` RPC.
+    /// (or strong `ETag` when unset) without issuing an extra `GetObject` RPC.
     public func downloadObjectData(
         _ object: Lumavault_V1_ObjectMetadata,
         maxBytes: Int64 = DataPlaneClient.defaultMaxDownloadBytes
     ) async throws -> Data {
+        try DataPlaneClient.validateObjectID(object.id)
         if maxBytes >= 0, object.sizeBytes > UInt64(maxBytes) {
             throw LumaVaultError.payloadTooLarge(
                 sizeBytes: Int64(clamping: object.sizeBytes),
                 maxBytes: maxBytes
             )
         }
-        return try await dataPlane.downloadStreamData(
-            objectID: object.id,
-            expectedSHA256: object.sha256Digest,
-            maxBytes: maxBytes
-        )
+        let expected = object.sha256Digest.isEmpty ? nil : object.sha256Digest
+        return try await runDataPlane {
+            try await transport.downloadStreamData(
+                objectID: object.id,
+                expectedSHA256: expected,
+                maxBytes: maxBytes
+            )
+        }
     }
 
     /// Downloads `objectID` into memory, enforcing `maxBytes` and verifying `expectedSHA256`
@@ -361,21 +402,24 @@ public final class LumaVaultClient: Sendable {
         expectedSHA256: String? = nil,
         maxBytes: Int64 = DataPlaneClient.defaultMaxDownloadBytes
     ) async throws -> Data {
-        try await dataPlane.downloadStreamData(
-            objectID: objectID,
-            expectedSHA256: expectedSHA256,
-            maxBytes: maxBytes
-        )
+        try DataPlaneClient.validateObjectID(objectID)
+        return try await runDataPlane {
+            try await transport.downloadStreamData(
+                objectID: objectID,
+                expectedSHA256: expectedSHA256,
+                maxBytes: maxBytes
+            )
+        }
     }
 
     /// Builds `${baseURL}/v1/stream/${objectID}` for `AVPlayer` `HTTP 206` byte-range streaming.
     public func streamURL(forObjectID objectID: String) -> URL {
-        dataPlane.streamURL(forObjectID: objectID)
+        transport.streamURL(forObjectID: objectID)
     }
 
     /// Builds `${baseURL}/v1/chunks/${hash}` for immutable content-addressed chunks.
     public func chunkURL(forHash hash: String) -> URL {
-        dataPlane.chunkURL(forHash: hash)
+        transport.chunkURL(forHash: hash)
     }
 
     /// Returns `${baseURL}/v1/chunks/${object.thumbnailChunkHash}`, or `nil` when `thumbnailChunkHash` is empty.
@@ -383,7 +427,7 @@ public final class LumaVaultClient: Sendable {
         guard !object.thumbnailChunkHash.isEmpty else {
             return nil
         }
-        return dataPlane.chunkURL(forHash: object.thumbnailChunkHash)
+        return transport.chunkURL(forHash: object.thumbnailChunkHash)
     }
 
     // MARK: - Private Helpers
@@ -401,7 +445,6 @@ public final class LumaVaultClient: Sendable {
         chunkSizeBytes: Int?,
         skipDedup: Bool,
         maxConcurrentUploads: Int,
-        headers: Connect.Headers,
         onProgress: (@Sendable (UploadProgress) -> Void)?,
         makePlan: (_ chunkSize: Int, _ onHashProgress: @escaping (UInt64, UInt64) -> Void) throws -> ChunkPlan,
         loadChunk: @escaping @Sendable (ChunkDescriptor) throws -> Data
@@ -456,7 +499,7 @@ public final class LumaVaultClient: Sendable {
             try Task.checkCancellation()
             onProgress?(.checking(totalChunks: uniqueUnits.count))
 
-            let missingHashes = try await hasChunks(uniqueUnits.map(\.hash), headers: headers)
+            let missingHashes = try await hasChunks(uniqueUnits.map(\.hash))
             let missingSet = Set(missingHashes)
             let missingUnits = uniqueUnits.filter { missingSet.contains($0.hash) }
 
@@ -464,16 +507,22 @@ public final class LumaVaultClient: Sendable {
                 let concurrency = max(1, min(maxConcurrentUploads, missingUnits.count))
                 onProgress?(.uploading(completedChunks: 0, totalChunks: missingUnits.count))
 
-                try await withThrowingTaskGroup(of: Void.self) { [dataPlane] group in
+                try await withThrowingTaskGroup(of: Void.self) { group in
                     var nextIndex = 0
-                    while nextIndex < concurrency {
+                    func enqueueNext() {
                         let unit = missingUnits[nextIndex]
                         nextIndex += 1
-                        group.addTask {
+                        group.addTask { [self] in
                             try Task.checkCancellation()
                             let bytes = try unit.loadBytes()
-                            try await dataPlane.putChunk(data: bytes, hash: unit.hash)
+                            try await self.runDataPlane {
+                                try await self.transport.putChunk(data: bytes, hash: unit.hash)
+                            }
                         }
+                    }
+
+                    while nextIndex < concurrency {
+                        enqueueNext()
                     }
 
                     var completed = 0
@@ -483,13 +532,7 @@ public final class LumaVaultClient: Sendable {
 
                         if nextIndex < missingUnits.count {
                             try Task.checkCancellation()
-                            let unit = missingUnits[nextIndex]
-                            nextIndex += 1
-                            group.addTask {
-                                try Task.checkCancellation()
-                                let bytes = try unit.loadBytes()
-                                try await dataPlane.putChunk(data: bytes, hash: unit.hash)
-                            }
+                            enqueueNext()
                         }
                     }
                 }
@@ -512,8 +555,16 @@ public final class LumaVaultClient: Sendable {
         }
         commitReq.skipDedup = skipDedup
 
-        let commitResp = try await commitObject(commitReq, headers: headers)
+        let commitResp = try await commitObject(commitReq)
         return UploadResult(object: commitResp.object, deduplicated: commitResp.deduplicated)
+    }
+
+    private func runDataPlane<T>(_ operation: () async throws -> T) async throws -> T {
+        do {
+            return try await operation()
+        } catch let urlError as URLError where urlError.code == .cancelled && Task.isCancelled {
+            throw CancellationError()
+        }
     }
 
     private func unwrap<Output: ProtobufMessage>(
@@ -533,6 +584,24 @@ public final class LumaVaultClient: Sendable {
         }
     }
 
+    private static func validateNamespace(_ namespace: Lumavault_V1_Namespace) throws {
+        switch namespace {
+        case .photos, .cinema, .games:
+            return
+        case .unspecified, .UNRECOGNIZED:
+            throw LumaVaultError.invalidNamespace(namespace)
+        }
+    }
+
+    private static func connectHeaders(from headers: [String: String]) -> Connect.Headers {
+        guard !headers.isEmpty else { return [:] }
+        var converted: Connect.Headers = [:]
+        for (key, value) in headers {
+            converted[key.lowercased()] = [value]
+        }
+        return converted
+    }
+
     private static func normalizedHost(from baseURL: URL) -> String {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: true) else {
             return baseURL.absoluteString
@@ -543,5 +612,56 @@ public final class LumaVaultClient: Sendable {
         components.percentEncodedQuery = nil
         components.percentEncodedFragment = nil
         return components.url?.absoluteString ?? baseURL.absoluteString
+    }
+}
+
+private actor ObjectPageCursor {
+    private let client: LumaVaultClient
+    private let namespace: Lumavault_V1_Namespace
+    private let pageSize: Int32
+    private let headers: [String: String]
+
+    private var buffer: ArraySlice<Lumavault_V1_ObjectMetadata> = []
+    private var nextPageToken = ""
+    private var seenTokens = Set<String>()
+    private var finished = false
+
+    init(
+        client: LumaVaultClient,
+        namespace: Lumavault_V1_Namespace,
+        pageSize: Int32,
+        headers: [String: String]
+    ) {
+        self.client = client
+        self.namespace = namespace
+        self.pageSize = pageSize
+        self.headers = headers
+    }
+
+    func next() async throws -> Lumavault_V1_ObjectMetadata? {
+        while buffer.isEmpty {
+            if finished {
+                return nil
+            }
+            let page = try await client.listObjects(
+                namespace: namespace,
+                pageSize: pageSize,
+                pageToken: nextPageToken,
+                headers: headers
+            )
+            buffer = page.objects[...]
+            if page.nextPageToken.isEmpty {
+                finished = true
+            } else {
+                guard seenTokens.insert(page.nextPageToken).inserted else {
+                    finished = true
+                    throw LumaVaultError.invalidResponse(
+                        "ListObjects returned repeating next_page_token"
+                    )
+                }
+                nextPageToken = page.nextPageToken
+            }
+        }
+        return buffer.removeFirst()
     }
 }

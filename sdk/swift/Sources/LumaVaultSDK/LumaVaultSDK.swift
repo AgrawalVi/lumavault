@@ -1,4 +1,3 @@
-@_exported import Connect
 import Foundation
 @_exported import SwiftProtobuf
 

@@ -6,9 +6,9 @@ import XCTest
 
 final class LumaVaultClientTests: XCTestCase {
     private var tempDirectory: URL!
-    private var config: URLSessionConfiguration!
-    private var session: URLSession!
+    private var baseURL: URL!
     private var mockStorage: MockStorageServiceClient!
+    private var mockTransport: MockDataPlane!
     private var client: LumaVaultClient!
 
     override func setUpWithError() throws {
@@ -17,33 +17,28 @@ final class LumaVaultClientTests: XCTestCase {
             .appendingPathComponent("lumavault-client-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
 
-        ClientMockURLProtocol.reset()
-        config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [ClientMockURLProtocol.self]
-        session = URLSession(configuration: config)
+        MockURLProtocol.reset()
+        baseURL = URL(string: "https://vault.example.com/")!
         mockStorage = MockStorageServiceClient()
-
-        let baseURL = URL(string: "https://vault.example.com/")!
-        let dataPlane = DataPlaneClient(baseURL: baseURL, session: session)
+        mockTransport = MockDataPlane(baseURL: baseURL)
         client = LumaVaultClient(
             baseURL: baseURL,
             storageClient: mockStorage,
-            dataPlane: dataPlane
+            transport: mockTransport
         )
     }
 
     override func tearDownWithError() throws {
-        session.invalidateAndCancel()
-        ClientMockURLProtocol.reset()
+        MockURLProtocol.reset()
         if let tempDirectory {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         try super.tearDownWithError()
     }
 
-    func testFreshMultiChunkUploadFileEnforcesBoundedConcurrencyAndEmitsProgress() async throws {
+    func testFreshMultiChunkUploadFileEnforcesBoundedConcurrencyAndCoalescesProgress() async throws {
         let chunkSize = Chunker.minChunkSizeBytes // 4 MiB
-        let totalSize = 4 * chunkSize + 512 * 1024 // 16.5 MiB -> 5 chunks
+        let totalSize = 4 * chunkSize + 512 * 1024 // 16.5 MiB -> 5 chunks (528 x 32 KiB reads)
         let payload = makeDeterministicData(count: totalSize, seed: 101)
         let fileURL = tempDirectory.appendingPathComponent("vacation.mov")
         try payload.write(to: fileURL)
@@ -58,14 +53,10 @@ final class LumaVaultClientTests: XCTestCase {
             return ResponseMessage(result: .success(resp))
         }
 
-        let uploadTracker = UploadTracker()
-        ClientMockURLProtocol.setHandler { request, body in
-            XCTAssertEqual(request.httpMethod, "PUT")
-            let hash = request.url!.lastPathComponent
-            uploadTracker.enter(hash: hash, data: body)
-            Thread.sleep(forTimeInterval: 0.02)
-            uploadTracker.leave()
-            return ClientMockResponse(statusCode: 201)
+        let gate = ConcurrencyGate(targetParallelism: 2)
+        mockTransport.onPutChunk = { data, hash in
+            await gate.enterAndWaitForPair(hash: hash, data: data)
+            await gate.leave()
         }
 
         mockStorage.onCommitObject = { req, _ in
@@ -79,10 +70,8 @@ final class LumaVaultClientTests: XCTestCase {
             XCTAssertEqual(req.thumbnailChunkHash, "")
             XCTAssertFalse(req.skipDedup)
 
-            var obj = Self.makeObject(from: req, id: "obj-photo-1")
-            obj.createdAt = Google_Protobuf_Timestamp(date: Date(timeIntervalSince1970: 1_700_000_000))
             var resp = Lumavault_V1_CommitObjectResponse()
-            resp.object = obj
+            resp.object = Self.makeObject(from: req, id: "obj-photo-1")
             resp.deduplicated = false
             return ResponseMessage(result: .success(resp))
         }
@@ -98,40 +87,67 @@ final class LumaVaultClientTests: XCTestCase {
 
         XCTAssertEqual(result.object.id, "obj-photo-1")
         XCTAssertFalse(result.deduplicated)
-        XCTAssertEqual(uploadTracker.uploadedByHash.count, 5)
-        XCTAssertLessThanOrEqual(uploadTracker.peakActive, 2)
-        XCTAssertEqual(uploadTracker.peakActive, 2)
+
+        let uploaded = await gate.uploadedByHash
+        let peakActive = await gate.peakActive
+        XCTAssertEqual(uploaded.count, 5)
+        XCTAssertEqual(peakActive, 2)
 
         for chunk in expectedPlan.chunks {
             let expectedSlice = try Chunker.sliceData(payload, chunk: chunk)
-            XCTAssertEqual(uploadTracker.uploadedByHash[chunk.hash], expectedSlice)
+            XCTAssertEqual(uploaded[chunk.hash], expectedSlice)
         }
 
         let events = progressBox.value
-        XCTAssertTrue(events.contains(where: {
-            if case .hashing(_, let total) = $0 { return total == UInt64(totalSize) }
-            return false
-        }))
+        let hashingEvents = events.compactMap { event -> (UInt64, UInt64)? in
+            if case .hashing(let hashed, let total) = event { return (hashed, total) }
+            return nil
+        }
+        // Coalesced by Chunker at ~1 MiB steps + chunk boundaries + EOF instead of 528 x 32 KiB reads.
+        XCTAssertLessThanOrEqual(hashingEvents.count, 24)
+        XCTAssertEqual(hashingEvents.last?.0, UInt64(totalSize))
+        XCTAssertEqual(hashingEvents.last?.1, UInt64(totalSize))
         XCTAssertTrue(events.contains(.checking(totalChunks: 5)))
         XCTAssertTrue(events.contains(.uploading(completedChunks: 0, totalChunks: 5)))
         XCTAssertTrue(events.contains(.uploading(completedChunks: 5, totalChunks: 5)))
         XCTAssertEqual(events.last, .committing)
     }
 
+    func testFailedChunkUploadAbortsBeforeCommitObject() async throws {
+        let chunkSize = Chunker.minChunkSizeBytes
+        let payload = makeDeterministicData(count: 3 * chunkSize, seed: 77)
+        let plan = try Chunker.planData(payload, chunkSizeBytes: chunkSize)
+        let failingHash = plan.chunks[1].hash
+
+        mockStorage.onHasChunks = { req, _ in
+            var resp = Lumavault_V1_HasChunksResponse()
+            resp.missingChunkHashes = req.chunkHashes
+            return ResponseMessage(result: .success(resp))
+        }
+        mockTransport.onPutChunk = { _, hash in
+            if hash == failingHash {
+                throw LumaVaultError.httpError(statusCode: 500, message: "disk full")
+            }
+        }
+        mockStorage.onCommitObject = { _, _ in
+            XCTFail("CommitObject must never run when a chunk upload fails")
+            return ResponseMessage(result: .success(Lumavault_V1_CommitObjectResponse()))
+        }
+
+        do {
+            _ = try await client.uploadData(payload, namespace: .photos, filename: "broken.bin")
+            XCTFail("Expected httpError(500)")
+        } catch let error as LumaVaultError {
+            XCTAssertEqual(error, .httpError(statusCode: 500, message: "disk full"))
+        }
+        XCTAssertEqual(mockStorage.commitCallCount, 0)
+    }
+
     func testPartialDeduplicationUploadsOnlyMissingChunkOfFour() async throws {
         let chunkSize = Chunker.minChunkSizeBytes
-        let c0 = makeDeterministicData(count: chunkSize, seed: 1)
-        let c1 = makeDeterministicData(count: chunkSize, seed: 2)
-        let c2 = makeDeterministicData(count: chunkSize, seed: 3)
-        let c3 = makeDeterministicData(count: chunkSize, seed: 4)
-
-        var fullSave = Data(capacity: 4 * chunkSize)
-        fullSave.append(c0)
-        fullSave.append(c1)
-        fullSave.append(c2)
-        fullSave.append(c3)
-
-        let hashes = [c0, c1, c2, c3].map(Chunker.sha256Hex(of:))
+        let chunks = (1 ... 4).map { makeDeterministicData(count: chunkSize, seed: UInt64($0)) }
+        let fullSave = chunks.reduce(into: Data(capacity: 4 * chunkSize)) { $0.append($1) }
+        let hashes = chunks.map(Chunker.sha256Hex(of:))
 
         mockStorage.onHasChunks = { req, _ in
             XCTAssertEqual(req.chunkHashes, hashes)
@@ -141,18 +157,15 @@ final class LumaVaultClientTests: XCTestCase {
         }
 
         let putHashes = LockedBox<[String]>([])
-        ClientMockURLProtocol.setHandler { request, body in
-            let hash = request.url!.lastPathComponent
+        mockTransport.onPutChunk = { data, hash in
             putHashes.withValue { $0.append(hash) }
-            XCTAssertEqual(body, c2)
-            return ClientMockResponse(statusCode: 201)
+            XCTAssertEqual(data, chunks[2])
         }
 
         mockStorage.onCommitObject = { req, _ in
             XCTAssertEqual(req.chunkHashes, hashes)
             var resp = Lumavault_V1_CommitObjectResponse()
             resp.object = Self.makeObject(from: req, id: "obj-nds-svs")
-            resp.deduplicated = false
             return ResponseMessage(result: .success(resp))
         }
 
@@ -164,7 +177,6 @@ final class LumaVaultClientTests: XCTestCase {
 
         XCTAssertEqual(result.object.id, "obj-nds-svs")
         XCTAssertEqual(putHashes.value, [hashes[2]])
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, 1)
     }
 
     func testFullDeduplicationUploadsZeroChunksAndSkipsUploadingPhase() async throws {
@@ -193,7 +205,7 @@ final class LumaVaultClientTests: XCTestCase {
 
         XCTAssertEqual(result.object.id, "obj-existing")
         XCTAssertTrue(result.deduplicated)
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, 0)
+        XCTAssertEqual(mockTransport.putCallCount, 0)
         XCTAssertFalse(progressBox.value.contains(where: {
             if case .uploading = $0 { return true }
             return false
@@ -210,7 +222,7 @@ final class LumaVaultClientTests: XCTestCase {
         var payload = Data(capacity: 3 * chunkSize + blockC.count)
         payload.append(blockA)
         payload.append(blockB)
-        payload.append(blockA) // Exact repeated 4 MiB chunk inside the same file
+        payload.append(blockA)
         payload.append(blockC)
 
         let hashA = Chunker.sha256Hex(of: blockA)
@@ -225,9 +237,8 @@ final class LumaVaultClientTests: XCTestCase {
         }
 
         let putHashes = LockedBox<[String]>([])
-        ClientMockURLProtocol.setHandler { request, _ in
-            putHashes.withValue { $0.append(request.url!.lastPathComponent) }
-            return ClientMockResponse(statusCode: 201)
+        mockTransport.onPutChunk = { _, hash in
+            putHashes.withValue { $0.append(hash) }
         }
 
         mockStorage.onCommitObject = { req, _ in
@@ -276,14 +287,34 @@ final class LumaVaultClientTests: XCTestCase {
         XCTAssertEqual(fileResult.object.id, "obj-empty")
         XCTAssertEqual(dataResult.object.id, "obj-empty")
         XCTAssertEqual(mockStorage.hasChunksCallCount, 0)
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, 0)
+        XCTAssertEqual(mockTransport.putCallCount, 0)
         XCTAssertEqual(
             progressBox.value,
             [.hashing(bytesHashed: 0, totalBytes: 0), .committing]
         )
     }
 
-    func testThumbnailUploadAndURLHelpers() async throws {
+    func testThumbnailUploadOversizedGuardAndURLHelpers() async throws {
+        let oversizedThumb = Data(count: Chunker.maxChunkSizeBytes + 1)
+        do {
+            _ = try await client.uploadData(
+                Data("photo".utf8),
+                namespace: .photos,
+                filename: "IMG.HEIC",
+                thumbnail: oversizedThumb
+            )
+            XCTFail("Expected payloadTooLarge")
+        } catch let error as LumaVaultError {
+            XCTAssertEqual(
+                error,
+                .payloadTooLarge(
+                    sizeBytes: Int64(Chunker.maxChunkSizeBytes + 1),
+                    maxBytes: Int64(Chunker.maxChunkSizeBytes)
+                )
+            )
+        }
+        XCTAssertEqual(mockStorage.hasChunksCallCount, 0)
+
         let photoBytes = Data("heic-image-payload".utf8)
         let thumbBytes = Data("jpeg-thumbnail-payload".utf8)
         let photoHash = Chunker.sha256Hex(of: photoBytes)
@@ -292,16 +323,18 @@ final class LumaVaultClientTests: XCTestCase {
         mockStorage.onHasChunks = { req, _ in
             XCTAssertEqual(req.chunkHashes, [photoHash, thumbHash])
             var resp = Lumavault_V1_HasChunksResponse()
-            resp.missingChunkHashes = [thumbHash] // Main chunk exists, only thumbnail missing
+            resp.missingChunkHashes = [thumbHash]
             return ResponseMessage(result: .success(resp))
         }
-
-        ClientMockURLProtocol.setHandler { request, body in
-            XCTAssertEqual(request.url?.path, "/v1/chunks/\(thumbHash)")
-            XCTAssertEqual(body, thumbBytes)
-            return ClientMockResponse(statusCode: 201)
+        mockTransport.onPutChunk = { data, hash in
+            XCTAssertEqual(hash, thumbHash)
+            XCTAssertEqual(data, thumbBytes)
         }
-
+        mockTransport.onGetChunk = { hash, verify in
+            XCTAssertEqual(hash, thumbHash)
+            XCTAssertTrue(verify)
+            return thumbBytes
+        }
         mockStorage.onCommitObject = { req, _ in
             XCTAssertEqual(req.chunkHashes, [photoHash])
             XCTAssertEqual(req.thumbnailChunkHash, thumbHash)
@@ -318,7 +351,9 @@ final class LumaVaultClientTests: XCTestCase {
             thumbnail: thumbBytes
         )
 
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, 1)
+        XCTAssertEqual(mockTransport.putCallCount, 1)
+        let fetchedThumb = try await client.getChunk(hash: thumbHash)
+        XCTAssertEqual(fetchedThumb, thumbBytes)
         XCTAssertEqual(
             client.thumbnailURL(for: result.object)?.absoluteString,
             "https://vault.example.com/v1/chunks/\(thumbHash)"
@@ -349,13 +384,9 @@ final class LumaVaultClientTests: XCTestCase {
             resp.missingChunkHashes = req.chunkHashes.filter { !current.contains($0) }
             return ResponseMessage(result: .success(resp))
         }
-
-        ClientMockURLProtocol.setHandler { request, _ in
-            let hash = request.url!.lastPathComponent
+        mockTransport.onPutChunk = { _, hash in
             storedChunks.withValue { _ = $0.insert(hash) }
-            return ClientMockResponse(statusCode: 201)
         }
-
         mockStorage.onCommitObject = { req, _ in
             XCTAssertTrue(req.skipDedup)
             XCTAssertEqual(req.sha256Digest, sramHash)
@@ -386,7 +417,7 @@ final class LumaVaultClientTests: XCTestCase {
         XCTAssertEqual(v2.object.id, "save-v2")
         XCTAssertFalse(v1.deduplicated)
         XCTAssertFalse(v2.deduplicated)
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, 1)
+        XCTAssertEqual(mockTransport.putCallCount, 1)
     }
 
     func testUpdateObjectMetadataBuildsFieldMaskAndRejectsEmptyMask() async throws {
@@ -399,10 +430,7 @@ final class LumaVaultClientTests: XCTestCase {
         XCTAssertEqual(mockStorage.updateCallCount, 0)
 
         do {
-            _ = try await client.updateObjectMetadata(
-                objectID: "obj-1",
-                thumbnailChunkHash: "invalid"
-            )
+            _ = try await client.updateObjectMetadata(objectID: "obj-1", thumbnailChunkHash: "invalid")
             XCTFail("Expected invalidHash")
         } catch let error as LumaVaultError {
             XCTAssertEqual(error, .invalidHash("invalid"))
@@ -415,10 +443,7 @@ final class LumaVaultClientTests: XCTestCase {
             XCTAssertEqual(req.object.filename, "renamed.mp4")
             XCTAssertEqual(req.object.mimeType, "video/mp4")
             XCTAssertEqual(req.object.thumbnailChunkHash, validThumb)
-            XCTAssertEqual(
-                req.updateMask.paths,
-                ["filename", "mime_type", "thumbnail_chunk_hash"]
-            )
+            XCTAssertEqual(req.updateMask.paths, ["filename", "mime_type", "thumbnail_chunk_hash"])
             var resp = Lumavault_V1_UpdateObjectMetadataResponse()
             resp.object = req.object
             return ResponseMessage(result: .success(resp))
@@ -433,7 +458,6 @@ final class LumaVaultClientTests: XCTestCase {
         XCTAssertEqual(updated.filename, "renamed.mp4")
         XCTAssertEqual(updated.thumbnailChunkHash, validThumb)
 
-        // Clearing thumbnailChunkHash with "" is allowed.
         mockStorage.onUpdateObjectMetadata = { req, _ in
             XCTAssertEqual(req.updateMask.paths, ["thumbnail_chunk_hash"])
             XCTAssertEqual(req.object.thumbnailChunkHash, "")
@@ -441,14 +465,20 @@ final class LumaVaultClientTests: XCTestCase {
             resp.object = req.object
             return ResponseMessage(result: .success(resp))
         }
-        let cleared = try await client.updateObjectMetadata(
-            objectID: "obj-1",
-            thumbnailChunkHash: ""
-        )
+        let cleared = try await client.updateObjectMetadata(objectID: "obj-1", thumbnailChunkHash: "")
         XCTAssertEqual(cleared.thumbnailChunkHash, "")
     }
 
-    func testListAllObjectsStreamsAcrossPagesAndCancelsProducerOnEarlyBreak() async throws {
+    func testListAllObjectsDemandDrivenBackpressureEarlyBreakAndCycleGuard() async throws {
+        do {
+            _ = try await client.listObjects(namespace: .cinema, pageSize: -1)
+            XCTFail("Expected invalidArgument for negative pageSize")
+        } catch let error as LumaVaultError {
+            guard case .invalidArgument = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+
         let requestedTokens = LockedBox<[String]>([])
         mockStorage.onListObjects = { req, _ in
             XCTAssertEqual(req.namespace, .cinema)
@@ -479,36 +509,55 @@ final class LumaVaultClientTests: XCTestCase {
         XCTAssertEqual(collectedIDs, ["m1", "m2", "m3", "m4", "m5"])
         XCTAssertEqual(requestedTokens.value, ["", "cursor-1", "cursor-2"])
 
-        // Early break cancels producer task before subsequent pages execute.
-        let gateEntered = expectation(description: "page 2 entered or skipped")
-        gateEntered.isInverted = true
-        let earlyTokens = LockedBox<[String]>([])
-
-        mockStorage.onListObjects = { req, _ in
-            earlyTokens.withValue { $0.append(req.pageToken) }
-            if req.pageToken == "cursor-1" {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                if !Task.isCancelled {
-                    gateEntered.fulfill()
-                }
-                return ResponseMessage(result: .failure(.canceled()))
-            }
-            var resp = Lumavault_V1_ListObjectsResponse()
-            resp.objects = [Self.stubObject(id: "first"), Self.stubObject(id: "second")]
-            resp.nextPageToken = "cursor-1"
-            return ResponseMessage(result: .success(resp))
-        }
-
+        // Breaking on the first item of page 1 never requests page 2 (strict demand-driven backpressure).
+        requestedTokens.withValue { $0.removeAll() }
         var firstOnly: [String] = []
         for try await obj in client.listAllObjects(namespace: .cinema, pageSize: 2) {
             firstOnly.append(obj.id)
             break
         }
-        XCTAssertEqual(firstOnly, ["first"])
-        await fulfillment(of: [gateEntered], timeout: 0.25)
+        XCTAssertEqual(firstOnly, ["m1"])
+        XCTAssertEqual(requestedTokens.value, [""])
+
+        // Repeating next_page_token fails with invalidResponse instead of looping infinitely.
+        mockStorage.onListObjects = { _, _ in
+            var resp = Lumavault_V1_ListObjectsResponse()
+            resp.objects = [Self.stubObject(id: "dup")]
+            resp.nextPageToken = "stuck-token"
+            return ResponseMessage(result: .success(resp))
+        }
+        do {
+            for try await _ in client.listAllObjects(namespace: .cinema, pageSize: 1) {}
+            XCTFail("Expected invalidResponse on repeating cursor token")
+        } catch let error as LumaVaultError {
+            guard case .invalidResponse = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 
-    func testVerifiedDownloadsViaObjectMetadataAndObjectIDWithoutExtraGetObject() async throws {
+    func testVerifiedDownloadsErrorMappingCancellationAndWireRoundTrip() async throws {
+        do {
+            _ = try await client.getObject(objectID: "")
+            XCTFail("Expected invalidArgument for empty objectID")
+        } catch let error as LumaVaultError {
+            guard case .invalidArgument = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        let realDataPlane = DataPlaneClient(baseURL: baseURL, session: session)
+        let wiredDataClient = LumaVaultClient(
+            baseURL: baseURL,
+            storageClient: mockStorage,
+            dataPlane: realDataPlane
+        )
+
         let romBytes = Data((0 ..< 72 * 1024).map { UInt8(($0 * 7) & 0xFF) })
         let romHash = Chunker.sha256Hex(of: romBytes)
 
@@ -523,57 +572,65 @@ final class LumaVaultClientTests: XCTestCase {
             return ResponseMessage(result: .failure(ConnectError(code: .internalError, message: "unexpected")))
         }
 
-        // 1. Download via ObjectMetadata (verifies metadata.sha256Digest even without ETag header).
-        ClientMockURLProtocol.setHandler { request, _ in
+        // 1. ObjectMetadata download verifies metadata.sha256Digest without ETag or GetObject.
+        MockURLProtocol.setHandler { request, _ in
             XCTAssertEqual(request.url?.path, "/v1/stream/rom-emerald")
-            return ClientMockResponse(statusCode: 200, headers: [:], body: romBytes)
+            return MockResponse(statusCode: 200, headers: [:], body: romBytes)
         }
-
         let fileDest1 = tempDirectory.appendingPathComponent("emerald-meta.gba")
-        try await client.downloadObjectToFile(metadata, to: fileDest1)
+        try await wiredDataClient.downloadObjectToFile(metadata, to: fileDest1)
         XCTAssertEqual(try Data(contentsOf: fileDest1), romBytes)
-
-        let memData1 = try await client.downloadObjectData(metadata)
+        let memData1 = try await wiredDataClient.downloadObjectData(metadata)
         XCTAssertEqual(memData1, romBytes)
 
         // Fast-fail maxBytes check on ObjectMetadata.sizeBytes without hitting HTTP.
-        let countBeforeCap = ClientMockURLProtocol.requestCount
+        let beforeCap = MockURLProtocol.requestCount
         do {
-            _ = try await client.downloadObjectData(metadata, maxBytes: 1024)
+            _ = try await wiredDataClient.downloadObjectData(metadata, maxBytes: 1024)
             XCTFail("Expected payloadTooLarge")
         } catch let error as LumaVaultError {
             XCTAssertEqual(error, .payloadTooLarge(sizeBytes: Int64(romBytes.count), maxBytes: 1024))
         }
-        XCTAssertEqual(ClientMockURLProtocol.requestCount, countBeforeCap)
+        XCTAssertEqual(MockURLProtocol.requestCount, beforeCap)
 
-        // 2. Download via objectID + quoted ETag header.
-        ClientMockURLProtocol.setHandler { request, _ in
-            XCTAssertEqual(request.url?.path, "/v1/stream/rom-emerald")
-            return ClientMockResponse(
-                statusCode: 200,
-                headers: ["ETag": "\"\(romHash)\""],
-                body: romBytes
-            )
+        // 2. objectID download + unset-digest ObjectMetadata fallback verify against quoted ETag.
+        MockURLProtocol.setHandler { _, _ in
+            MockResponse(statusCode: 200, headers: ["ETag": "\"\(romHash)\""], body: romBytes)
         }
-
         let fileDest2 = tempDirectory.appendingPathComponent("emerald-id.gba")
-        try await client.downloadObjectToFile(objectID: "rom-emerald", to: fileDest2)
+        try await wiredDataClient.downloadObjectToFile(objectID: "rom-emerald", to: fileDest2)
         XCTAssertEqual(try Data(contentsOf: fileDest2), romBytes)
 
-        let memData2 = try await client.downloadObjectData(objectID: "rom-emerald")
-        XCTAssertEqual(memData2, romBytes)
+        var unsetDigestMeta = Lumavault_V1_ObjectMetadata()
+        unsetDigestMeta.id = "rom-emerald"
+        let fallbackData = try await wiredDataClient.downloadObjectData(unsetDigestMeta)
+        XCTAssertEqual(fallbackData, romBytes)
         XCTAssertEqual(mockStorage.getObjectCallCount, 0)
-    }
 
-    func testControlPlaneErrorMappingAndConvenienceInitializerWireRoundTrip() async throws {
-        mockStorage.onGetObject = { _, _ in
-            ResponseMessage(
+        // 3. Cancellation normalization across Data Plane (URLError.cancelled -> CancellationError).
+        mockTransport.onDownloadData = { _, _, _ in
+            throw URLError(.cancelled)
+        }
+        let localClient = self.client!
+        let cancelledDataTask = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await localClient.downloadObjectData(objectID: "rom-emerald")
+        }
+        do {
+            _ = try await cancelledDataTask.value
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {}
+
+        // 4. Connect error mapping, header forwarding, deleteObject, and convenience init wire round-trip.
+        mockStorage.onGetObject = { _, headers in
+            XCTAssertEqual(headers["x-trace-id"], ["trace-42"])
+            return ResponseMessage(
                 code: .notFound,
                 result: .failure(ConnectError(code: .notFound, message: "object missing"))
             )
         }
         do {
-            _ = try await client.getObject(objectID: "missing-id")
+            _ = try await client.getObject(objectID: "missing-id", headers: ["X-Trace-Id": "trace-42"])
             XCTFail("Expected rpcError")
         } catch let error as LumaVaultError {
             XCTAssertEqual(error, .rpcError(code: .notFound, message: "object missing"))
@@ -585,32 +642,25 @@ final class LumaVaultClientTests: XCTestCase {
         }
         try await client.deleteObject(objectID: "del-1")
 
-        // Exercise convenience init(baseURL:configuration:) end-to-end through Connect-Swift + URLSessionHTTPClient.
         let wireClient = LumaVaultClient(
             baseURL: URL(string: "https://vault.example.com/prefix///")!,
             configuration: config
         )
-
-        let expectedObj = Self.stubObject(id: "wire-obj-1")
         var wireResp = Lumavault_V1_GetObjectResponse()
-        wireResp.object = expectedObj
+        wireResp.object = Self.stubObject(id: "wire-obj-1")
         let serializedResp = try wireResp.serializedData()
 
-        ClientMockURLProtocol.setHandler { request, body in
+        MockURLProtocol.setHandler { request, body in
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(
-                request.url?.path,
-                "/prefix/lumavault.v1.StorageService/GetObject"
-            )
+            XCTAssertEqual(request.url?.path, "/prefix/lumavault.v1.StorageService/GetObject")
             let decodedReq = try Lumavault_V1_GetObjectRequest(serializedBytes: body)
             XCTAssertEqual(decodedReq.objectID, "wire-obj-1")
-            return ClientMockResponse(
+            return MockResponse(
                 statusCode: 200,
                 headers: ["Content-Type": "application/proto"],
                 body: serializedResp
             )
         }
-
         let fetched = try await wireClient.getObject(objectID: "wire-obj-1")
         XCTAssertEqual(fetched.id, "wire-obj-1")
     }
@@ -646,21 +696,13 @@ final class LumaVaultClientTests: XCTestCase {
         var state = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
         var data = Data(count: count)
         data.withUnsafeMutableBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return
-            }
+            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             var i = 0
             while i + 8 <= count {
                 state ^= state << 13
                 state ^= state >> 7
                 state ^= state << 17
-                var little = state.littleEndian
-                withUnsafeBytes(of: &little) { src in
-                    base.advanced(by: i).update(
-                        from: src.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        count: 8
-                    )
-                }
+                base.advanced(by: i).withMemoryRebound(to: UInt64.self, capacity: 1) { $0.pointee = state.littleEndian }
                 i += 8
             }
             while i < count {
@@ -675,49 +717,105 @@ final class LumaVaultClientTests: XCTestCase {
     }
 }
 
-// MARK: - Thread-Safe Test Doubles
+// MARK: - Test Doubles
 
 private final class LockedBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: T
 
-    init(_ initial: T) {
-        self.storage = initial
-    }
+    init(_ initial: T) { self.storage = initial }
 
-    var value: T {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage
-    }
+    var value: T { lock.withLock { storage } }
 
     func withValue<R>(_ body: (inout T) -> R) -> R {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&storage)
+        lock.withLock { body(&storage) }
     }
 }
 
-private final class UploadTracker: @unchecked Sendable {
-    private let lock = NSLock()
+private actor ConcurrencyGate {
+    private let targetParallelism: Int
     private var active = 0
     private(set) var peakActive = 0
     private(set) var uploadedByHash: [String: Data] = [:]
+    private var pairSatisfied = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    func enter(hash: String, data: Data) {
-        lock.lock()
-        defer { lock.unlock() }
+    init(targetParallelism: Int) {
+        self.targetParallelism = targetParallelism
+    }
+
+    func enterAndWaitForPair(hash: String, data: Data) async {
         active += 1
         if active > peakActive {
             peakActive = active
         }
         uploadedByHash[hash] = data
+
+        if pairSatisfied {
+            return
+        }
+        if active >= targetParallelism {
+            pairSatisfied = true
+            let pending = waiters
+            waiters.removeAll()
+            for waiter in pending {
+                waiter.resume()
+            }
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
     }
 
     func leave() {
-        lock.lock()
-        defer { lock.unlock() }
         active -= 1
+    }
+}
+
+private final class MockDataPlane: DataPlaneTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let urlBuilder: DataPlaneClient
+
+    var onPutChunk: (@Sendable (Data, String) async throws -> Void)?
+    var onGetChunk: (@Sendable (String, Bool) async throws -> Data)?
+    var onDownloadFile: (@Sendable (String, URL, String?) async throws -> Void)?
+    var onDownloadData: (@Sendable (String, String?, Int64) async throws -> Data)?
+    private(set) var putCallCount = 0
+
+    init(baseURL: URL) {
+        self.urlBuilder = DataPlaneClient(baseURL: baseURL, configuration: .ephemeral)
+    }
+
+    func streamURL(forObjectID objectID: String) -> URL {
+        urlBuilder.streamURL(forObjectID: objectID)
+    }
+
+    func chunkURL(forHash hash: String) -> URL {
+        urlBuilder.chunkURL(forHash: hash)
+    }
+
+    func putChunk(data: Data, hash: String) async throws {
+        let handler = lock.withLock {
+            putCallCount += 1
+            return onPutChunk
+        }
+        try await handler?(data, hash)
+    }
+
+    func getChunk(hash: String, verifyHash: Bool) async throws -> Data {
+        let handler = lock.withLock { onGetChunk }
+        return try await handler?(hash, verifyHash) ?? Data()
+    }
+
+    func downloadStreamToFile(objectID: String, to destinationURL: URL, expectedSHA256: String?) async throws {
+        let handler = lock.withLock { onDownloadFile }
+        try await handler?(objectID, destinationURL, expectedSHA256)
+    }
+
+    func downloadStreamData(objectID: String, expectedSHA256: String?, maxBytes: Int64) async throws -> Data {
+        let handler = lock.withLock { onDownloadData }
+        return try await handler?(objectID, expectedSHA256, maxBytes) ?? Data()
     }
 }
 
@@ -732,202 +830,53 @@ private final class MockStorageServiceClient: Lumavault_V1_StorageServiceClientI
     var onDeleteObject: (@Sendable (Lumavault_V1_DeleteObjectRequest, Connect.Headers) async -> ResponseMessage<Lumavault_V1_DeleteObjectResponse>)?
 
     private(set) var hasChunksCallCount = 0
+    private(set) var commitCallCount = 0
     private(set) var getObjectCallCount = 0
     private(set) var updateCallCount = 0
 
-    func hasChunks(
-        request: Lumavault_V1_HasChunksRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_HasChunksResponse> {
-        let handler: (@Sendable (Lumavault_V1_HasChunksRequest, Connect.Headers) async -> ResponseMessage<Lumavault_V1_HasChunksResponse>)? = {
-            lock.lock()
-            defer { lock.unlock() }
-            hasChunksCallCount += 1
-            return onHasChunks
-        }()
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func hasChunks(request: Lumavault_V1_HasChunksRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_HasChunksResponse> {
+        guard let handler = lock.withLock({ hasChunksCallCount += 1; return onHasChunks }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
 
-    func commitObject(
-        request: Lumavault_V1_CommitObjectRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_CommitObjectResponse> {
-        let handler = lock.withLock { onCommitObject }
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func commitObject(request: Lumavault_V1_CommitObjectRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_CommitObjectResponse> {
+        guard let handler = lock.withLock({ commitCallCount += 1; return onCommitObject }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
 
-    func getObject(
-        request: Lumavault_V1_GetObjectRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_GetObjectResponse> {
-        let handler: (@Sendable (Lumavault_V1_GetObjectRequest, Connect.Headers) async -> ResponseMessage<Lumavault_V1_GetObjectResponse>)? = {
-            lock.lock()
-            defer { lock.unlock() }
-            getObjectCallCount += 1
-            return onGetObject
-        }()
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func getObject(request: Lumavault_V1_GetObjectRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_GetObjectResponse> {
+        guard let handler = lock.withLock({ getObjectCallCount += 1; return onGetObject }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
 
-    func listObjects(
-        request: Lumavault_V1_ListObjectsRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_ListObjectsResponse> {
-        let handler = lock.withLock { onListObjects }
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func listObjects(request: Lumavault_V1_ListObjectsRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_ListObjectsResponse> {
+        guard let handler = lock.withLock({ onListObjects }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
 
-    func updateObjectMetadata(
-        request: Lumavault_V1_UpdateObjectMetadataRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_UpdateObjectMetadataResponse> {
-        let handler: (@Sendable (Lumavault_V1_UpdateObjectMetadataRequest, Connect.Headers) async -> ResponseMessage<Lumavault_V1_UpdateObjectMetadataResponse>)? = {
-            lock.lock()
-            defer { lock.unlock() }
-            updateCallCount += 1
-            return onUpdateObjectMetadata
-        }()
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func updateObjectMetadata(request: Lumavault_V1_UpdateObjectMetadataRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_UpdateObjectMetadataResponse> {
+        guard let handler = lock.withLock({ updateCallCount += 1; return onUpdateObjectMetadata }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
 
-    func deleteObject(
-        request: Lumavault_V1_DeleteObjectRequest,
-        headers: Connect.Headers
-    ) async -> ResponseMessage<Lumavault_V1_DeleteObjectResponse> {
-        let handler = lock.withLock { onDeleteObject }
-        guard let handler else {
-            return ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
+    func deleteObject(request: Lumavault_V1_DeleteObjectRequest, headers: Connect.Headers) async -> ResponseMessage<Lumavault_V1_DeleteObjectResponse> {
+        guard let handler = lock.withLock({ onDeleteObject }) else {
+            return Self.unimplemented()
         }
         return await handler(request, headers)
     }
-}
 
-private struct ClientMockResponse: Sendable {
-    let statusCode: Int
-    let headers: [String: String]
-    let body: Data
-
-    init(statusCode: Int, headers: [String: String] = [:], body: Data = Data()) {
-        self.statusCode = statusCode
-        self.headers = headers
-        self.body = body
-    }
-}
-
-private final class ClientMockURLProtocol: URLProtocol, @unchecked Sendable {
-    typealias Handler = @Sendable (URLRequest, Data) throws -> ClientMockResponse
-
-    private final class State: @unchecked Sendable {
-        let lock = NSLock()
-        var handler: Handler?
-        var count = 0
-    }
-
-    private static let state = State()
-
-    static var requestCount: Int {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        return state.count
-    }
-
-    static func setHandler(_ newHandler: @escaping Handler) {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        state.handler = newHandler
-    }
-
-    static func reset() {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        state.handler = nil
-        state.count = 0
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        let activeHandler: Handler? = {
-            Self.state.lock.lock()
-            defer { Self.state.lock.unlock() }
-            Self.state.count += 1
-            return Self.state.handler
-        }()
-
-        guard let activeHandler, let url = request.url else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-
-        let body = Self.readRequestBody(from: request)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let mock = try activeHandler(self.request, body)
-                guard let response = HTTPURLResponse(
-                    url: url,
-                    statusCode: mock.statusCode,
-                    httpVersion: "HTTP/1.1",
-                    headerFields: mock.headers
-                ) else {
-                    self.client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-                    return
-                }
-                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                if !mock.body.isEmpty {
-                    self.client?.urlProtocol(self, didLoad: mock.body)
-                }
-                self.client?.urlProtocolDidFinishLoading(self)
-            } catch {
-                self.client?.urlProtocol(self, didFailWithError: error)
-            }
-        }
-    }
-
-    override func stopLoading() {}
-
-    private static func readRequestBody(from request: URLRequest) -> Data {
-        if let httpBody = request.httpBody {
-            return httpBody
-        }
-        guard let stream = request.httpBodyStream else {
-            return Data()
-        }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        let bufferSize = 16 * 1024
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { buffer.deallocate() }
-        while stream.hasBytesAvailable {
-            let read = stream.read(buffer, maxLength: bufferSize)
-            if read > 0 {
-                data.append(buffer, count: read)
-            } else {
-                break
-            }
-        }
-        return data
+    private static func unimplemented<T: ProtobufMessage>() -> ResponseMessage<T> {
+        ResponseMessage(code: .unimplemented, result: .failure(ConnectError(code: .unimplemented, message: nil)))
     }
 }

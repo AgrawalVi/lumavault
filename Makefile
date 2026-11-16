@@ -1,47 +1,53 @@
 BUF ?= $(shell command -v buf 2>/dev/null || echo $(shell go env GOPATH)/bin/buf)
-PROTO_STAMPS := \
+PROTO_OUTPUTS := \
 	gen/go/lumavault/v1/storage.pb.go \
+	gen/go/lumavault/v1/lumavaultv1connect/storage.connect.go \
 	sdk/web/src/gen/lumavault/v1/storage_pb.ts \
-	sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.pb.swift
+	sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.pb.swift \
+	sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.connect.swift
+PROTO_STAMP := gen/.proto.stamp
+MISSING_PROTO_OUTPUTS := $(strip $(foreach f,$(PROTO_OUTPUTS),$(if $(wildcard $(f)),,$(f))))
 
-.PHONY: proto build test lint run clean
+.PHONY: proto build test lint run clean force-proto
 
 proto:
 	$(BUF) lint
 	$(BUF) generate
+	@mkdir -p gen && touch $(PROTO_STAMP)
 
-gen/go/lumavault/v1/storage.pb.go: proto/lumavault/v1/storage.proto buf.yaml buf.gen.yaml
+ifneq ($(MISSING_PROTO_OUTPUTS),)
+$(PROTO_STAMP): force-proto
+endif
+
+$(PROTO_STAMP): proto/lumavault/v1/storage.proto buf.yaml buf.gen.yaml
 	$(BUF) generate
+	@mkdir -p gen && touch $(PROTO_STAMP)
 
-sdk/web/src/gen/lumavault/v1/storage_pb.ts: gen/go/lumavault/v1/storage.pb.go
-	@test -f $@ || $(BUF) generate
-
-sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.pb.swift: sdk/web/src/gen/lumavault/v1/storage_pb.ts
-	@test -f $@ || $(BUF) generate
+force-proto:
 
 sdk/web/node_modules: sdk/web/package.json
 	npm --prefix sdk/web install --no-package-lock
 	@touch sdk/web/node_modules
 
-build: $(PROTO_STAMPS) sdk/web/node_modules
+build: $(PROTO_STAMP) sdk/web/node_modules
 	@mkdir -p bin
 	go build -o bin/lumavault ./cmd/lumavault
 	npm --prefix sdk/web run build
 	swift build
 
-test: $(PROTO_STAMPS) sdk/web/node_modules
+test: $(PROTO_STAMP) sdk/web/node_modules
 	go test -race ./...
 	npm --prefix sdk/web run typecheck
 	npm --prefix sdk/web run --if-present test
 	swift test
 
-lint: $(PROTO_STAMPS) sdk/web/node_modules
+lint: $(PROTO_STAMP) sdk/web/node_modules
 	$(BUF) lint
 	go vet ./...
 	npm --prefix sdk/web run typecheck
-	swift build
+	swift build --build-tests
 
-run: $(PROTO_STAMPS)
+run: $(PROTO_STAMP)
 	go run ./cmd/lumavault
 
 clean:
