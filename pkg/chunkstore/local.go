@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgrawalVi/lumavault/pkg/constants"
+	"github.com/lumavault/lumavault/pkg/constants"
 )
 
 const (

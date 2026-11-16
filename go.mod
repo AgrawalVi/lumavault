@@ -1,4 +1,4 @@
-module github.com/AgrawalVi/lumavault
+module github.com/lumavault/lumavault
 
 go 1.26.0
 
