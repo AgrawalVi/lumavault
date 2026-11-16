@@ -51,14 +51,57 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
    - Split any file that mixes orchestration with helpers or grows past roughly 300 lines of non-test code.
 3. **The user makes design decisions, not the agent.** Whenever work reaches a fork (API shape, error model, wire contract, file/module layout, dependency choice, default values, naming of public symbols, behavior the spec does not pin down), stop and ask a clarifying question with the concrete options and their trade-offs before writing code. Do not pick a default silently and move on, and do not invent wire contracts (HTTP response bodies, headers, error strings) that the Gateway or `proto/` does not already define.
 
-## 4. Standard Commands
+## 4. Writing Style (Docs, Issues, Comments)
+
+Write so a reader new to the area understands it on the first read. Simple beats complete; the reader can always ask.
+
+**Docs and issues**
+- Open with one or two sentences: what this is and why it matters.
+- Use short, plain sentences. One idea per bullet.
+- Describe behavior and outcomes, not implementation. Leave function names, option names, and internal file layout to whoever builds it, unless they are a shared contract.
+- Use backticks only for paths, commands, and names that must be typed exactly. Write "4 MiB chunks" and "SHA-256", not `4 MiB` and `SHA-256`.
+- Use bold rarely. Do not bold every bullet label.
+- Define an unfamiliar term once, in plain words, the first time it appears.
+- An issue fits on one screen. If it does not, split it.
+
+Issue template:
+
+```
+Goal: one or two sentences.
+
+Owned paths: list of paths.
+
+What to build:
+- 3 to 6 short bullets describing behavior.
+
+Done when:
+- 2 to 5 checks anyone can verify.
+```
+
+**Linear and PR comments**
+- One point per comment, in two to four sentences: what is wrong, why it matters, what to change.
+- No headers, tables, or nested bullets in a comment.
+
+**Code comments**
+- Explain why, not what. If the code already says it, skip the comment.
+- Keep it to one line when possible, and follow the no-Markdown rule in section 3.
+
+**Example**
+
+Too dense:
+> **Streaming Chunker & SHA-256 Hasher (`src/chunker.ts`)**: Implement `prepareChunkPlan(input, options)` for `Blob`/`File` and `Uint8Array`, returning `{ sizeBytes, chunkSizeBytes, sha256Digest, chunks }` with lazy zero-copy chunk views...
+
+Better:
+> Split a file into fixed-size chunks and hash each one, without loading the whole file into memory. Large videos (50 GB+) must work in a browser tab.
+
+## 5. Standard Commands
 
 - `make proto` — Run `buf lint` and `buf generate` (Go, Swift, and TypeScript/Connect-ES stubs).
 - `make lint` — Run `buf lint`, `go vet ./...`, and SDK static checks.
 - `make test` — Run Go unit/integration tests (`go test -race ./...`) and SDK tests.
 - `make build` — Compile `cmd/lumavault`.
 
-## 5. Ticket Workflow (Branch, PR, Linear)
+## 6. Ticket Workflow (Branch, PR, Linear)
 
 Linear's GitHub integration handles issue status and PR links automatically when the branch name matches the issue's `gitBranchName`: the PR is linked, the issue moves to In Progress / In Review, and to Done on merge. Do not update status or attach PR links by hand.
 
