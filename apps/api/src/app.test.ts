@@ -12,6 +12,7 @@ import { RPC_PREFIX, RPC_READ_MAX_BYTES } from "./constants.js";
 import { createDatabase } from "./db/index.js";
 import { createEmailService } from "./email/emails.js";
 import { createMailer } from "./email/mailer.js";
+import { createStorageGateway } from "./services/storage-gateway.js";
 import { type ApiModule, loadModules, type ModuleContext, stopModules } from "./modules.js";
 import { requestKey } from "./request.js";
 
@@ -43,7 +44,8 @@ function testContext(): ModuleContext {
     sendMagicLink: async () => {},
   });
   const email = createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
-  return { config, db, auth, email };
+  const gateway = createStorageGateway({ baseUrl: config.gatewayUrl, serviceKey: config.serviceKey });
+  return { config, db, auth, email, gateway };
 }
 
 // Registers two IamService methods the way a real router file would.

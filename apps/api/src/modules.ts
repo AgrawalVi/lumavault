@@ -7,14 +7,16 @@ import type { Config } from "./config.js";
 import { MODULE_DIRS } from "./constants.js";
 import type { Db } from "./db/index.js";
 import type { EmailService } from "./email/emails.js";
+import type { StorageGateway } from "./services/storage-gateway.js";
 import { listSourceFiles } from "./source-files.js";
 
-/** What every module gets: config, the database, Better Auth, and email. */
+/** What every module gets: config, the database, Better Auth, email, and the Storage Gateway. */
 export interface ModuleContext {
   config: Config;
   db: Db;
   auth: Auth;
   email: EmailService;
+  gateway: StorageGateway;
 }
 
 /**
