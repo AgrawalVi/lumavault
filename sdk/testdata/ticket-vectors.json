@@ -1,0 +1,130 @@
+{
+  "secret": "lumavault-test-ticket-secret-0123456789abcdef",
+  "now": 1800000000,
+  "skewSeconds": 30,
+  "valid": [
+    {
+      "name": "upload",
+      "token": "v1.eyJrIjoidXAiLCJleHAiOjE4MDAwODY0MDAsIm5zIjoxLCJtYXgiOjUzNjg3MDkxMjB9.g0GAbbzl7pCebsXqdkVQEV-Q9Jqnm2xAL10bNhXgipQ",
+      "claims": {
+        "k": "up",
+        "exp": 1800086400,
+        "ns": 1,
+        "max": 5368709120
+      }
+    },
+    {
+      "name": "read object",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ.EeolAaX5yz0_MPtKMYu8aSOTg-UA18bSfsybo0jrkYM",
+      "claims": {
+        "k": "rd",
+        "exp": 1800021600,
+        "obj": "obj-123"
+      }
+    },
+    {
+      "name": "read thumbnail chunk",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsImNoayI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifQ.JI5OB7jdvmUoCcD0fCw4QbBDGWGMLJ1vVUy9P86KL5w",
+      "claims": {
+        "k": "rd",
+        "exp": 1800021600,
+        "chk": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "expired within clock skew",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE3OTk5OTk5NzAsIm9iaiI6Im9iai0xMjMifQ.SV8aPCf1-3sbcfZ3GoCf3tHVTEutFMpfBEuiYkQUm1o",
+      "claims": {
+        "k": "rd",
+        "exp": 1799999970,
+        "obj": "obj-123"
+      }
+    },
+    {
+      "name": "unknown fields are ignored",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMDAwNjAsIm9iaiI6Im8iLCJmdXR1cmUiOjF9.NxPxet_VcwMpHs0-HpYQgymCEVFMNSHpCMFrZjbAufg",
+      "claims": {
+        "k": "rd",
+        "exp": 1800000060,
+        "obj": "o"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong prefix",
+      "token": "v2.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ.EeolAaX5yz0_MPtKMYu8aSOTg-UA18bSfsybo0jrkYM",
+      "error": "malformed"
+    },
+    {
+      "name": "missing signature",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ",
+      "error": "malformed"
+    },
+    {
+      "name": "bad base64 payload",
+      "token": "v1.!!!.7x9QTigj3dOkrc1yjTHmthmqnCW8e5pnN3wWt7mm5y0",
+      "error": "malformed"
+    },
+    {
+      "name": "payload is not JSON",
+      "token": "v1.bm90IGpzb24.LxsbHDkPtBXtZF6Ps9lXVg5cKi07tuCxkjgo_rjJja4",
+      "error": "malformed"
+    },
+    {
+      "name": "signature changed",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ.EeolAaX5yz0_MPtKMYu8aSOTg-UA18bSfsybo0jrkYA",
+      "error": "signature"
+    },
+    {
+      "name": "payload changed",
+      "token": "v1.ByJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ.EeolAaX5yz0_MPtKMYu8aSOTg-UA18bSfsybo0jrkYM",
+      "error": "signature"
+    },
+    {
+      "name": "signed with another secret",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMjE2MDAsIm9iaiI6Im9iai0xMjMifQ.9pi_9gHTV1d09Hebwk-lVebRvfXxQ7voWB8lyWxzIxM",
+      "error": "signature"
+    },
+    {
+      "name": "expired",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE3OTk5OTk5NjksIm9iaiI6Im8ifQ.9prdf298lUJzHGnel54771WyZBytfN0qa-8QV8FwtSg",
+      "error": "expired"
+    },
+    {
+      "name": "unknown kind",
+      "token": "v1.eyJrIjoienoiLCJleHAiOjE4MDAwMDAwNjB9.4BgTnd68EK5T5GQp0LLJSV1y13Sei03kKccaX2kSTI8",
+      "error": "claims"
+    },
+    {
+      "name": "missing expiry",
+      "token": "v1.eyJrIjoicmQiLCJvYmoiOiJvIn0.C4iUaPfu6Vuj0_s-6wvlFLZqFtCDR0YncniUsmcGSN8",
+      "error": "claims"
+    },
+    {
+      "name": "read with object and chunk",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMDAwNjAsIm9iaiI6Im8iLCJjaGsiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIn0.Px2XstEYbhk_2E7S0CJFMJxuATTZP45n1qxyaYRaY_o",
+      "error": "claims"
+    },
+    {
+      "name": "read with neither",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMDAwNjB9.BRdWuRL3WvX2LjFcAhP9C8cLCnz3X0x7xEXkuOIAE4k",
+      "error": "claims"
+    },
+    {
+      "name": "read chunk not a SHA-256",
+      "token": "v1.eyJrIjoicmQiLCJleHAiOjE4MDAwMDAwNjAsImNoayI6IkFCQyJ9.J1cibN6DfySsleHOIE9PJNFP68hdOMkTU6HmJa8R3JE",
+      "error": "claims"
+    },
+    {
+      "name": "upload without namespace",
+      "token": "v1.eyJrIjoidXAiLCJleHAiOjE4MDAwMDAwNjAsIm1heCI6MX0.IjIhZBwZeqBerd-X_SO3XUV8L4rdortjSab7kmnC8Vs",
+      "error": "claims"
+    },
+    {
+      "name": "upload without max size",
+      "token": "v1.eyJrIjoidXAiLCJleHAiOjE4MDAwMDAwNjAsIm5zIjoxfQ.vbptDXb2SfqTuZrK9gDQjmwGQiYSB084_3qpUWdiG8M",
+      "error": "claims"
+    }
+  ]
+}
