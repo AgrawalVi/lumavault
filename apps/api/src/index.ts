@@ -14,6 +14,9 @@ const config = loadConfig(process.env);
 const database = createDatabase(config.databaseUrl);
 await ensureSchemas(database.db);
 
+const mailer = createMailer({ smtpUrl: config.smtpUrl, from: config.mailFrom });
+const email = createEmailService(mailer);
+
 const auth = createAuth({
   db: database.db,
   tables: authTables,
@@ -21,12 +24,11 @@ const auth = createAuth({
   baseURL: config.apiUrl,
   trustedOrigins: config.webOrigins,
   passkeyRpID: new URL(config.portalUrl).hostname,
-  // Until the mailer lands, print links so local sign-in still works.
-  sendMagicLink: async ({ email, url }) => console.info(`magic link for ${email}: ${url}`),
+  sendMagicLink: ({ email: to, url }) => email.sendMagicLink(to, { url }),
+  cookieDomain: config.cookieDomain,
 });
 
-const mailer = createMailer({ smtpUrl: config.smtpUrl, from: config.mailFrom });
-const ctx: ModuleContext = { config, db: database.db, auth, email: createEmailService(mailer) };
+const ctx: ModuleContext = { config, db: database.db, auth, email };
 const modules = await loadModules();
 const app = createApp(ctx, modules);
 await startModules(modules, ctx);

@@ -29,11 +29,17 @@ export interface AuthDeps {
   trustedOrigins: string[];
   /** Hostname passkeys are bound to, shared by every web app, for example localhost. */
   passkeyRpID: string;
-  /** Sends a magic-link email. Wired to the mailer in M2. */
+  /** Sends a magic-link email through the mailer. */
   sendMagicLink: (message: MagicLinkMessage) => Promise<void>;
+  /**
+   * Parent domain for session cookies, for example example.com, when the web apps and API
+   * live on different subdomains. Unset keeps cookies on the API host, which already works
+   * for every web app because they all call the same API.
+   */
+  cookieDomain?: string;
 }
 
-/** Builds the Better Auth instance. Sign-in flows, emails, and sign-up rules arrive in M2. */
+/** Builds the Better Auth instance. Sign-up rules and household lockdown arrive in LUM-36. */
 export function createAuth(deps: AuthDeps) {
   return betterAuth({
     secret: deps.secret,
@@ -42,6 +48,9 @@ export function createAuth(deps: AuthDeps) {
     trustedOrigins: deps.trustedOrigins,
     database: drizzleAdapter(deps.db, { provider: "pg", schema: deps.tables }),
     emailAndPassword: { enabled: true },
+    // No cookie cache: every request reads the session row, so bans and revocations apply at once.
+    session: { cookieCache: { enabled: false } },
+    advanced: deps.cookieDomain ? { crossSubDomainCookies: { enabled: true, domain: deps.cookieDomain } } : {},
     plugins: [
       passkey({ rpID: deps.passkeyRpID, rpName: PASSKEY_RP_NAME, origin: deps.trustedOrigins }),
       magicLink({ sendMagicLink: (message) => deps.sendMagicLink(message) }),
