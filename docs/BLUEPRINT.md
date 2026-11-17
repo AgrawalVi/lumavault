@@ -131,41 +131,19 @@ All web frontends are **pure client-side Vite + React 19 + `@tanstack/react-rout
 
 ---
 
-## 5. Linear Roadmap & Parallel Worktree Project Structure
+## 5. Linear Project Structure
 
-Work is organized in Linear under team **Lumavault (`LUM`)** across **7 Projects**. App projects follow a **Contract-First + Parallel Execution** milestone pattern (`M1` defines `.proto` + Drizzle schema types, unlocking `M2` Backend, `M3` Vite SPA, and `M4` SwiftUI in parallel worktrees):
+Work is organized in Linear under team Lumavault (`LUM`) across 7 projects, listed in execution order. Linear holds the live roadmap: milestones, issues, and idea issues for future features (see AGENTS.md). This section only records the project layout, so it does not drift from Linear.
 
-1. **`1. Core Backend, Contracts & Basic Data Layer` (`P-LUM-1`)**
-   - `M1`: Monorepo & Buf Protobuf Contracts (`storage.proto`, `Makefile`, multi-language codegen)
-   - `M2`: Basic Data Layer (`LocalChunkStore` & `LocalMetadataStore` + deterministic `Engine`)
-   - `M3`: Client Gateway (`pkg/gateway` Connect-RPC + HTTP Data Plane + `cmd/lumavault` + `docker-compose.yml`)
-   - `M4`: Stateless Signed Storage Ticket Auth Middleware (`pkg/gateway` `Bearer` / `?token=...` & internal service key)
-2. **`2. Client SDKs (Web/TypeScript & Swift)` (`P-LUM-2`)**
-   - `M1`: Web / TypeScript SDK (`sdk/web`)
-   - `M2`: Swift SDK (`sdk/swift`)
-   - `M3`: Signed Storage Ticket Support & `"./gen/*"` App Subpath Exports (`sdk/web` & `sdk/swift`)
-3. **`3. App Platform, Auth & Multi-Tenant RBAC` (`P-LUM-7`)**
-   - `M1`: `pnpm-workspace.yaml`, `iam.proto`, & Headless Hono + Drizzle `apps/api` Scaffold (with pre-wired domain slots)
-   - `M2`: `better-auth` SSO/Bearer, Household Quotas/Allowances, Cross-Household RBAC & Storage Ticket Minter (`apps/api`)
-   - `M3`: Headless `@lumavault/ui` Primitives & `apps/portal` Vite SPA (Login, Household Manager, Shares & Super-Admin)
-4. **`4. LumaVault Photos` (`P-LUM-3`)**
-   - `M1`: `photos.proto` Contract & Drizzle `photos` Schema Spec
-   - `M2`: Hono `PhotosService` Router, Shared Album RBAC, `512px` Thumbnail Worker & 2-Stage Trash Sweeper *(parallel)*
-   - `M3`: Photos Vite Web SPA (`apps/photos/web` — Modern Google Photos UI) *(parallel)*
-   - `M4`: Photos Apple SwiftUI App (`apps/photos/apple` — `iOS`/`iPadOS`/`macOS`, `PhotoKit`, Live Photos, Map) *(parallel)*
-5. **`5. LumaVault Cinema` (`P-LUM-4`)**
-   - `M1`: `cinema.proto` Contract & Drizzle `cinema` Schema Spec
-   - `M2`: Hono `CinemaService` Router, TMDB Proxy, Cross-Household Grants & Per-User Watch Progress *(parallel)*
-   - `M3`: Cinema Vite Web SPA (`apps/cinema/web` — Modern Netflix UI & 4K Scrubbing) *(parallel)*
-   - `M4`: Cinema Apple SwiftUI App (`apps/cinema/apple` — `tvOS`/`iOS`/`iPadOS`/`macOS` `AVPlayer`/4K HDR) *(parallel)*
-6. **`6. LumaVault Arcade` (`P-LUM-5`)**
-   - `M1`: `arcade.proto` Contract & Drizzle `arcade` Schema Spec
-   - `M2`: Hono `ArcadeService` Router, IGDB Proxy, Monotonic Save Versioning & Zero-Upload Rollback *(parallel)*
-   - `M3`: Arcade Vite Web SPA (`apps/arcade/web` — Console Launcher UI & Save Timeline) *(parallel)*
-   - `M4`: Arcade Apple SwiftUI App (`apps/arcade/apple` — Verified ROM Cache & Delta Handoff) *(parallel)*
-7. **`7. Distributed Systems Upgrades (Paxos & Chunkservers)` (`P-LUM-6`)**
-   - `M1`: Pluggable Multi-Paxos Consensus (`PaxosMetadataStore`)
-   - `M2`: Replicated Chunkservers & Bit-Rot Scrubber (`ReplicatedChunkStore`)
+App projects (Photos, Cinema, Arcade) follow a contract-first pattern. Their first milestone defines the `.proto` contract and Drizzle schema. That unlocks the backend, web app, and Apple app milestones, which run in parallel worktrees.
+
+1. Core Backend, Contracts & Basic Data Layer (`P-LUM-1`)
+2. Client SDKs, Web/TypeScript & Swift (`P-LUM-2`)
+3. App Platform, Auth & Multi-Tenant RBAC (`P-LUM-7`)
+4. LumaVault Photos (`P-LUM-3`)
+5. LumaVault Cinema (`P-LUM-4`)
+6. LumaVault Arcade (`P-LUM-5`)
+7. Distributed Systems Upgrades, Paxos & Chunkservers (`P-LUM-6`)
 
 ---
 
