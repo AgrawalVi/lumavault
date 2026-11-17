@@ -8,7 +8,7 @@ import (
 )
 
 // CommitRequest checks a commit manifest without any I/O: namespace, every SHA-256 digest,
-// chunk size bounds, and that len(chunk_hashes) equals ceil(size_bytes / chunk_size_bytes).
+// chunk size bounds, a non-zero size_bytes, and that len(chunk_hashes) equals ceil(size_bytes / chunk_size_bytes).
 func CommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 	if req == nil {
 		return fmt.Errorf("%w: request is nil", ErrInvalid)
@@ -35,11 +35,9 @@ func CommitRequest(req *lumavaultv1.CommitObjectRequest) error {
 		return fmt.Errorf("%w: chunk_size_bytes (%d) exceeds max (%d)", ErrInvalid, req.ChunkSizeBytes, constants.MaxChunkSizeBytes)
 	}
 
+	// An empty photo, video, ROM, or save is always a mistake, such as a failed export.
 	if req.SizeBytes == 0 {
-		if len(req.ChunkHashes) != 0 {
-			return fmt.Errorf("%w: size_bytes is 0 but len(chunk_hashes) is %d", ErrInvalid, len(req.ChunkHashes))
-		}
-		return nil
+		return fmt.Errorf("%w: size_bytes must be > 0", ErrInvalid)
 	}
 	if req.ChunkSizeBytes == 0 {
 		return fmt.Errorf("%w: chunk_size_bytes must be > 0 when size_bytes > 0", ErrInvalid)

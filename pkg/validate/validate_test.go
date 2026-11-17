@@ -77,8 +77,8 @@ func TestCommitRequest(t *testing.T) {
 		t.Fatalf("valid request: %v", err)
 	}
 	empty := &lumavaultv1.CommitObjectRequest{Namespace: lumavaultv1.Namespace_NAMESPACE_GAMES, Sha256Digest: goodHash}
-	if err := CommitRequest(empty); err != nil {
-		t.Fatalf("empty object: %v", err)
+	if err := CommitRequest(empty); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty object: got %v, want ErrInvalid", err)
 	}
 
 	bad := map[string]func(r *lumavaultv1.CommitObjectRequest){
