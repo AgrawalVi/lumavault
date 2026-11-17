@@ -4,6 +4,8 @@ import { createAuth } from "#/auth/auth.js";
 import { loadConfig } from "#/config.js";
 import * as authTables from "#/db/schemas/auth.js";
 import type { TestDatabase } from "#/db/testing.js";
+import { createEmailService } from "#/email/emails.js";
+import { createMailer } from "#/email/mailer.js";
 import type { ModuleContext } from "#/modules.js";
 import { requestKey } from "#/request.js";
 
@@ -32,7 +34,8 @@ export function createTestContext(database: Pick<TestDatabase, "db">, env: Recor
     passkeyRpID: "localhost",
     sendMagicLink: async () => {},
   });
-  return { config, db: database.db, auth };
+  const email = createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
+  return { config, db: database.db, auth, email };
 }
 
 export interface TestUser {

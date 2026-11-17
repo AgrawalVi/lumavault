@@ -6,13 +6,15 @@ import type { Auth } from "./auth/auth.js";
 import type { Config } from "./config.js";
 import { MODULE_DIRS } from "./constants.js";
 import type { Db } from "./db/index.js";
+import type { EmailService } from "./email/emails.js";
 import { listSourceFiles } from "./source-files.js";
 
-/** What every module gets: config, the database, and Better Auth. */
+/** What every module gets: config, the database, Better Auth, and email. */
 export interface ModuleContext {
   config: Config;
   db: Db;
   auth: Auth;
+  email: EmailService;
 }
 
 /**

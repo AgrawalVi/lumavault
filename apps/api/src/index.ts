@@ -6,6 +6,8 @@ import { loadConfig } from "./config.js";
 import { SHUTDOWN_TIMEOUT_MS } from "./constants.js";
 import { createDatabase, ensureSchemas } from "./db/index.js";
 import * as authTables from "./db/schemas/auth.js";
+import { createEmailService } from "./email/emails.js";
+import { createMailer } from "./email/mailer.js";
 import { loadModules, type ModuleContext, startModules, stopModules } from "./modules.js";
 
 const config = loadConfig(process.env);
@@ -23,7 +25,8 @@ const auth = createAuth({
   sendMagicLink: async ({ email, url }) => console.info(`magic link for ${email}: ${url}`),
 });
 
-const ctx: ModuleContext = { config, db: database.db, auth };
+const mailer = createMailer({ smtpUrl: config.smtpUrl, from: config.mailFrom });
+const ctx: ModuleContext = { config, db: database.db, auth, email: createEmailService(mailer) };
 const modules = await loadModules();
 const app = createApp(ctx, modules);
 await startModules(modules, ctx);
@@ -51,6 +54,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   // close waits for open requests to finish before the pool goes away.
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await mailer.close();
   await database.close();
   process.exit(0);
 }

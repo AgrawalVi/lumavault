@@ -10,6 +10,8 @@ import { createAuth } from "./auth/auth.js";
 import { type Config, loadConfig } from "./config.js";
 import { RPC_PREFIX, RPC_READ_MAX_BYTES } from "./constants.js";
 import { createDatabase } from "./db/index.js";
+import { createEmailService } from "./email/emails.js";
+import { createMailer } from "./email/mailer.js";
 import { type ApiModule, loadModules, type ModuleContext, stopModules } from "./modules.js";
 import { requestKey } from "./request.js";
 
@@ -40,7 +42,8 @@ function testContext(): ModuleContext {
     passkeyRpID: "localhost",
     sendMagicLink: async () => {},
   });
-  return { config, db, auth };
+  const email = createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
+  return { config, db, auth, email };
 }
 
 // Registers two IamService methods the way a real router file would.
