@@ -59,9 +59,15 @@ type harness struct {
 	chunkRoot string
 }
 
-// newHarness starts a gateway over fresh stores. Any seed manifests are written to disk
-// before the metadata store opens, as if a previous run had stored them.
+// newHarness starts a gateway over fresh stores with ticket checks off. Any seed manifests
+// are written to disk before the metadata store opens, as if a previous run had stored them.
 func newHarness(t *testing.T, seed ...*lumavaultv1.ObjectMetadata) *harness {
+	t.Helper()
+	return newHarnessWith(t, nil, seed...)
+}
+
+// newHarnessWith is newHarness with handler options, such as ticket checks.
+func newHarnessWith(t *testing.T, opts []Option, seed ...*lumavaultv1.ObjectMetadata) *harness {
 	t.Helper()
 	root := t.TempDir()
 	chunkRoot := filepath.Join(root, "chunks")
@@ -76,7 +82,7 @@ func newHarness(t *testing.T, seed ...*lumavaultv1.ObjectMetadata) *harness {
 		t.Fatal(err)
 	}
 	counting := &countingChunks{ChunkStore: cs}
-	srv := httptest.NewServer(NewHandler(ms, counting))
+	srv := httptest.NewServer(NewHandler(ms, counting, opts...))
 	t.Cleanup(srv.Close)
 	client := lumavaultv1connect.NewStorageServiceClient(
 		connect.NewClient(connecthttp.NewTransport(srv.Client(), srv.URL)))
