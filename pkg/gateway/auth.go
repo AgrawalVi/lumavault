@@ -2,10 +2,14 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"slices"
 	"strings"
 
 	"connectrpc.com/connect/v2"
 	lumavaultv1 "github.com/lumavault/lumavault/gen/go/lumavault/v1"
+	"github.com/lumavault/lumavault/pkg/metadata"
 	"github.com/lumavault/lumavault/pkg/ticket"
 )
 
@@ -95,6 +99,52 @@ func (g *gateway) requireService(ctx context.Context, rpc string) error {
 		return denied(rpc)
 	}
 	return nil
+}
+
+// httpCredential reads the caller's credential from a data plane request. GET and HEAD may
+// also carry the ticket in the token query parameter. On failure it writes 401 or 403.
+func (g *gateway) httpCredential(w http.ResponseWriter, r *http.Request) (credential, bool) {
+	var fromQuery string
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		fromQuery = r.URL.Query().Get(queryToken)
+	}
+	cred, err := g.auth.credentialFrom(r.Header.Get(headerAuthorization), r.Header.Get(headerServiceKey), fromQuery)
+	if err != nil {
+		writeAuthError(w, err)
+		return credential{}, false
+	}
+	return cred, true
+}
+
+// writeAuthError writes a Connect auth error as the data plane's JSON error body.
+func writeAuthError(w http.ResponseWriter, err error) {
+	status := http.StatusForbidden
+	if connect.CodeOf(err) == connect.CodeUnauthenticated {
+		status = http.StatusUnauthorized
+	}
+	writeError(w, status, err.Error())
+}
+
+// allowChunkRead lets a read ticket fetch its own thumbnail chunk, or any chunk listed in its
+// object's manifest, so verified downloads work with one ticket per object.
+func (g *gateway) allowChunkRead(ctx context.Context, c credential, hash string) (bool, error) {
+	if c.service {
+		return true, nil
+	}
+	if c.claims.Kind != ticket.KindRead {
+		return false, nil
+	}
+	if c.claims.ChunkSHA256 != "" {
+		return c.claims.ChunkSHA256 == hash, nil
+	}
+	obj, err := g.meta.GetObject(ctx, c.claims.ObjectID)
+	if err != nil {
+		if errors.Is(err, metadata.ErrObjectNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return hash == obj.GetThumbnailChunkHash() || slices.Contains(obj.GetChunkHashes(), hash), nil
 }
 
 func denied(what string) error {

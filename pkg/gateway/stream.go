@@ -15,6 +15,14 @@ import (
 // stream serves GET and HEAD /v1/stream/{object_id} as one byte sequence across the
 // object's chunks, with single-range 206 support for video players.
 func (g *gateway) stream(w http.ResponseWriter, r *http.Request) {
+	cred, ok := g.httpCredential(w, r)
+	if !ok {
+		return
+	}
+	if !cred.readsObject(r.PathValue(paramObjectID)) {
+		writeAuthError(w, denied("this object"))
+		return
+	}
 	obj, err := g.meta.GetObject(r.Context(), r.PathValue(paramObjectID))
 	if err != nil {
 		switch {

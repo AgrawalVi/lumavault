@@ -19,6 +19,7 @@ import (
 	"github.com/lumavault/lumavault/pkg/chunkstore"
 	"github.com/lumavault/lumavault/pkg/gateway"
 	"github.com/lumavault/lumavault/pkg/metadata"
+	"github.com/lumavault/lumavault/pkg/ticket"
 )
 
 func main() {
@@ -47,6 +48,17 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 
+	var opts []gateway.Option
+	if cfg.ticketSecret != "" {
+		verifier, err := ticket.NewVerifier([]byte(cfg.ticketSecret))
+		if err != nil {
+			return err
+		}
+		opts = append(opts, gateway.WithTicketAuth(verifier, cfg.serviceKey))
+	} else {
+		log.Warn("storage ticket checks are off; set " + envTicketSecret + " and " + envServiceKey + " to turn them on")
+	}
+
 	ln, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return err
@@ -55,7 +67,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 	server := &http.Server{
-		Handler:           gateway.NewHandler(meta, chunks),
+		Handler:           gateway.NewHandler(meta, chunks, opts...),
 		Protocols:         protocols,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,

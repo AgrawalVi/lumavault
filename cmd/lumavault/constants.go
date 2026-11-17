@@ -12,6 +12,9 @@ const (
 	envDataDir       = "LUMAVAULT_DATA_DIR"
 	envGCInterval    = "LUMAVAULT_GC_INTERVAL"
 	envGCGracePeriod = "LUMAVAULT_GC_GRACE_PERIOD"
+	// Secrets come only from the environment, never flags, so they stay out of process lists.
+	envTicketSecret = "LUMAVAULT_TICKET_SECRET"
+	envServiceKey   = "LUMAVAULT_SERVICE_KEY"
 
 	chunkStoreSubdir = "chunkstore"
 	metadataSubdir   = "metadata"

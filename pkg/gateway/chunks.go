@@ -18,6 +18,14 @@ type putChunkResponse struct {
 
 // putChunk streams the request body straight into ChunkStore, which verifies the SHA-256.
 func (g *gateway) putChunk(w http.ResponseWriter, r *http.Request) {
+	cred, ok := g.httpCredential(w, r)
+	if !ok {
+		return
+	}
+	if !cred.upload() {
+		writeAuthError(w, denied("chunk uploads"))
+		return
+	}
 	hash := r.PathValue(paramSHA256)
 	if err := validate.Hash(hash); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -48,9 +56,22 @@ func (g *gateway) putChunk(w http.ResponseWriter, r *http.Request) {
 
 // getChunk serves a whole chunk for GET and HEAD with immutable caching headers.
 func (g *gateway) getChunk(w http.ResponseWriter, r *http.Request) {
+	cred, ok := g.httpCredential(w, r)
+	if !ok {
+		return
+	}
 	hash := r.PathValue(paramSHA256)
 	if err := validate.Hash(hash); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	allowed, err := g.allowChunkRead(r.Context(), cred, hash)
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	if !allowed {
+		writeAuthError(w, denied("this chunk"))
 		return
 	}
 

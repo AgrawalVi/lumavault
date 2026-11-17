@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/lumavault/lumavault/pkg/ticket"
 )
 
 // config holds the server settings. Each flag falls back to its environment variable,
@@ -15,6 +17,9 @@ type config struct {
 	dataDir       string
 	gcInterval    time.Duration
 	gcGracePeriod time.Duration
+	// ticketSecret turns on storage ticket checks when set. serviceKey must be set with it.
+	ticketSecret string
+	serviceKey   string
 }
 
 func parseConfig(args []string) (config, error) {
@@ -41,7 +46,16 @@ func parseConfig(args []string) (config, error) {
 		return cfg, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
 
+	cfg.ticketSecret = os.Getenv(envTicketSecret)
+	cfg.serviceKey = os.Getenv(envServiceKey)
+
 	switch {
+	case cfg.ticketSecret != "" && len(cfg.ticketSecret) < ticket.MinSecretBytes:
+		return cfg, fmt.Errorf("%s must be at least %d bytes", envTicketSecret, ticket.MinSecretBytes)
+	case cfg.ticketSecret != "" && cfg.serviceKey == "":
+		return cfg, fmt.Errorf("%s is required when %s is set", envServiceKey, envTicketSecret)
+	case cfg.ticketSecret == "" && cfg.serviceKey != "":
+		return cfg, fmt.Errorf("%s is set but %s is not, so it would never be checked", envServiceKey, envTicketSecret)
 	case cfg.addr == "":
 		return cfg, errors.New("-addr must not be empty")
 	case cfg.dataDir == "":

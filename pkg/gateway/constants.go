@@ -13,7 +13,7 @@ const (
 
 	corsAllowOrigin  = "*"
 	corsAllowMethods = "GET, HEAD, POST, PUT, OPTIONS"
-	corsAllowHeaders = "Range, If-Range, If-None-Match, Content-Type, Connect-Protocol-Version, " +
+	corsAllowHeaders = "Authorization, Range, If-Range, If-None-Match, Content-Type, Connect-Protocol-Version, " +
 		"Connect-Timeout-Ms, Connect-Accept-Encoding, Grpc-Timeout, X-Grpc-Web"
 	corsExposeHeaders = "Content-Range, Accept-Ranges, Content-Length, ETag, " +
 		"Connect-Content-Encoding, Grpc-Status, Grpc-Message"
@@ -61,4 +61,7 @@ const (
 	headerAuthorization = "Authorization"
 	headerServiceKey    = "X-LumaVault-Service-Key"
 	bearerScheme        = "bearer"
+
+	// queryToken carries a ticket on GET URLs for video and image elements that cannot set headers.
+	queryToken = "token"
 )
