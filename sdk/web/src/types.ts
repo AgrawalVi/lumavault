@@ -1,0 +1,58 @@
+import type { Namespace, ObjectMetadata } from "./gen/lumavault/v1/storage_pb.js";
+import type { UploadInput } from "./chunking/source.js";
+
+export type { UploadInput };
+
+export interface LumaVaultClientOptions {
+  /** Storage Gateway base URL, for example http://localhost:8080. */
+  baseUrl: string;
+}
+
+export interface UploadProgress {
+  /** Hashing runs over the whole file first, then missing chunks are uploaded. */
+  phase: "hashing" | "uploading";
+  loaded: number;
+  total: number;
+  /** loaded / total as a number from 0 to 100. */
+  percentage: number;
+}
+
+export interface UploadOptions {
+  namespace: Namespace;
+  /** Defaults to the File name. Required for a plain Blob or Uint8Array. */
+  filename?: string;
+  /** Defaults to the Blob type. */
+  mimeType?: string;
+  /** Chunk uploads in flight at once. Defaults to 4. */
+  concurrency?: number;
+  onProgress?: (progress: UploadProgress) => void;
+  signal?: AbortSignal;
+}
+
+/** The committed object plus a URL that streams it. */
+export type UploadResult = ObjectMetadata & { url: string };
+
+export interface DownloadOptions {
+  signal?: AbortSignal;
+}
+
+export interface UpdateFields {
+  filename?: string;
+  mimeType?: string;
+  thumbnailChunkHash?: string;
+}
+
+export interface ListOptions {
+  namespace: Namespace;
+  /** The cursor from a previous page. Omit for the first page. */
+  cursor?: string;
+  /** Page size. The gateway applies its own default and maximum. */
+  limit?: number;
+}
+
+export interface ListPage {
+  objects: ObjectMetadata[];
+  /** Pass to the next list call. Undefined on the last page. */
+  cursor?: string;
+  hasMore: boolean;
+}

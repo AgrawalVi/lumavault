@@ -18,7 +18,10 @@ export interface ChunkPlan {
  * Splits the input into chunks and hashes each chunk and the whole input in one pass.
  * Only one chunk is held in memory at a time, so multi-gigabyte Files are safe.
  */
-export async function planChunks(input: UploadInput): Promise<ChunkPlan> {
+export async function planChunks(
+  input: UploadInput,
+  onHashed?: (hashedBytes: number, totalBytes: number) => void,
+): Promise<ChunkPlan> {
   const source = toByteSource(input);
   if (source.size === 0) {
     throw new ConnectError("empty files cannot be uploaded", Code.InvalidArgument);
@@ -33,6 +36,7 @@ export async function planChunks(input: UploadInput): Promise<ChunkPlan> {
     const bytes = await source.read(pos, Math.min(pos + chunkSizeBytes, source.size));
     fileHasher.update(bytes);
     chunkHashes.push(toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))));
+    onHashed?.(pos + bytes.byteLength, source.size);
   }
 
   return { sizeBytes: source.size, chunkSizeBytes, sha256Digest: fileHasher.digest("hex"), chunkHashes };
