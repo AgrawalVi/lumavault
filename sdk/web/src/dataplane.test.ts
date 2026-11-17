@@ -22,13 +22,15 @@ describe("data plane errors", () => {
     [400, Code.InvalidArgument],
     [404, Code.NotFound],
     [413, Code.InvalidArgument],
+    [401, Code.Unauthenticated],
+    [403, Code.PermissionDenied],
     [500, Code.Internal],
     [503, Code.Unavailable],
   ];
   for (const [status, code] of cases) {
     it(`maps HTTP ${status} to ${Code[code]} with the gateway message`, async () => {
       respond(status, { error: "boom" });
-      const err = await failure(getChunk(BASE, HASH));
+      const err = await failure(getChunk(BASE, HASH, {}));
       expect(err.code).toBe(code);
       expect(err.rawMessage).toBe("boom");
     });
@@ -36,16 +38,16 @@ describe("data plane errors", () => {
 
   it("maps a network failure to unavailable", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("fetch failed"))));
-    expect((await failure(getChunk(BASE, HASH))).code).toBe(Code.Unavailable);
+    expect((await failure(getChunk(BASE, HASH, {}))).code).toBe(Code.Unavailable);
   });
 
   it("rejects a PUT when the gateway stored a different size", async () => {
     respond(201, { sha256: HASH, size_bytes: 2 });
-    expect((await failure(putChunk(BASE, HASH, new Uint8Array(3)))).code).toBe(Code.Internal);
+    expect((await failure(putChunk(BASE, HASH, new Uint8Array(3), {}))).code).toBe(Code.Internal);
   });
 
   it("accepts a PUT when the stored size matches", async () => {
     respond(201, { sha256: HASH, size_bytes: 3 });
-    await expect(putChunk(BASE, HASH, new Uint8Array(3))).resolves.toBeUndefined();
+    await expect(putChunk(BASE, HASH, new Uint8Array(3), {})).resolves.toBeUndefined();
   });
 });

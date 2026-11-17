@@ -7,9 +7,10 @@ export async function putChunk(
   baseUrl: string,
   sha256: string,
   body: Blob | Uint8Array<ArrayBuffer>,
+  headers: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await send(chunkUrl(baseUrl, sha256), { method: "PUT", body, signal });
+  const res = await send(chunkUrl(baseUrl, sha256), { method: "PUT", body, headers, signal });
   const stored = (await res.json()) as { size_bytes?: number };
   const expected = body instanceof Blob ? body.size : body.byteLength;
   if (stored.size_bytes !== expected) {
@@ -18,8 +19,13 @@ export async function putChunk(
 }
 
 /** Downloads one whole chunk. The caller verifies its hash. */
-export async function getChunk(baseUrl: string, sha256: string, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
-  const res = await send(chunkUrl(baseUrl, sha256), { method: "GET", signal });
+export async function getChunk(
+  baseUrl: string,
+  sha256: string,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const res = await send(chunkUrl(baseUrl, sha256), { method: "GET", headers, signal });
   return new Uint8Array(await res.arrayBuffer());
 }
 

@@ -6,9 +6,9 @@ import type { ObjectMetadata } from "./gen/lumavault/v1/storage_pb.js";
 
 export type ChunkFetcher = (sha256: string, signal?: AbortSignal) => Promise<Uint8Array<ArrayBuffer>>;
 
-/** Fetches chunks over the data plane. */
-export function gatewayChunkFetcher(baseUrl: string): ChunkFetcher {
-  return (sha256, signal) => getChunk(baseUrl, sha256, signal);
+/** Fetches chunks over the data plane with the given credential headers. */
+export function gatewayChunkFetcher(baseUrl: string, headers: Record<string, string>): ChunkFetcher {
+  return (sha256, signal) => getChunk(baseUrl, sha256, headers, signal);
 }
 
 /**

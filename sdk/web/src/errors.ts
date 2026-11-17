@@ -10,6 +10,10 @@ export function codeForStatus(status: number): Code {
     case 400:
     case 413:
       return Code.InvalidArgument;
+    case 401:
+      return Code.Unauthenticated;
+    case 403:
+      return Code.PermissionDenied;
     case 404:
       return Code.NotFound;
     case 500:
