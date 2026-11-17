@@ -19,7 +19,9 @@ import (
 	"github.com/lumavault/lumavault/gen/go/lumavault/v1/lumavaultv1connect"
 	"github.com/lumavault/lumavault/pkg/chunkstore"
 	"github.com/lumavault/lumavault/pkg/metadata"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // countingChunks wraps a real ChunkStore and counts the calls that touch chunk data.
@@ -57,7 +59,9 @@ type harness struct {
 	chunkRoot string
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness starts a gateway over fresh stores. Any seed manifests are written to disk
+// before the metadata store opens, as if a previous run had stored them.
+func newHarness(t *testing.T, seed ...*lumavaultv1.ObjectMetadata) *harness {
 	t.Helper()
 	root := t.TempDir()
 	chunkRoot := filepath.Join(root, "chunks")
@@ -65,7 +69,9 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms, err := metadata.NewLocalMetadataStore(filepath.Join(root, "meta"))
+	metaRoot := filepath.Join(root, "meta")
+	seedObjects(t, filepath.Join(metaRoot, "objects"), seed)
+	ms, err := metadata.NewLocalMetadataStore(metaRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +81,35 @@ func newHarness(t *testing.T) *harness {
 	client := lumavaultv1connect.NewStorageServiceClient(
 		connect.NewClient(connecthttp.NewTransport(srv.Client(), srv.URL)))
 	return &harness{t: t, srv: srv, client: client, chunks: counting, chunkRoot: chunkRoot}
+}
+
+func seedObjects(t *testing.T, dir string, objs []*lumavaultv1.ObjectMetadata) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range objs {
+		raw, err := proto.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, obj.GetId()+".pb"), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// legacyEmptyObject is a 0-byte manifest of the kind stored before CommitObject rejected them.
+func legacyEmptyObject() *lumavaultv1.ObjectMetadata {
+	return &lumavaultv1.ObjectMetadata{
+		Id:           "00000000-0000-4000-8000-000000000000",
+		Namespace:    lumavaultv1.Namespace_NAMESPACE_CINEMA,
+		Filename:     "empty.mp4",
+		MimeType:     "video/mp4",
+		Sha256Digest: sha(nil),
+		CreatedAt:    timestamppb.Now(),
+		UpdatedAt:    timestamppb.Now(),
+	}
 }
 
 func sha(b []byte) string {

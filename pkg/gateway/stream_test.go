@@ -91,9 +91,9 @@ func TestStreamHeadAndConditional(t *testing.T) {
 }
 
 func TestStreamNotSatisfiable(t *testing.T) {
-	h := newHarness(t)
+	empty := legacyEmptyObject()
+	h := newHarness(t, empty)
 	obj := h.upload(pattern(streamSize), 1000)
-	empty := h.upload(nil, 1)
 	h.chunks.reset()
 
 	for _, tc := range []struct{ id, rng, total string }{
@@ -115,9 +115,9 @@ func TestStreamNotSatisfiable(t *testing.T) {
 	}
 }
 
-func TestStreamEmptyObject(t *testing.T) {
-	h := newHarness(t)
-	obj := h.upload(nil, 1)
+func TestStreamLegacyEmptyObject(t *testing.T) {
+	obj := legacyEmptyObject()
+	h := newHarness(t, obj)
 	res, body := h.do(http.MethodGet, "/v1/stream/"+obj.GetId(), nil, nil)
 	if res.StatusCode != 200 || len(body) != 0 || res.Header.Get("Content-Length") != "0" {
 		t.Fatalf("empty: %d len %d", res.StatusCode, len(body))

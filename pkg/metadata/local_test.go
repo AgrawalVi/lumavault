@@ -125,6 +125,15 @@ func TestCommitObject_Validation(t *testing.T) {
 			wantErr: ErrInvalidArgument,
 		},
 		{
+			name: "zero size_bytes",
+			req: &lumavaultv1.CommitObjectRequest{
+				Namespace:    lumavaultv1.Namespace_NAMESPACE_PHOTOS,
+				SizeBytes:    0,
+				Sha256Digest: validDigest,
+			},
+			wantErr: ErrInvalidArgument,
+		},
+		{
 			name: "zero size_bytes with non-empty chunk_hashes",
 			req: &lumavaultv1.CommitObjectRequest{
 				Namespace:      lumavaultv1.Namespace_NAMESPACE_PHOTOS,

@@ -81,6 +81,7 @@ message CommitObjectRequest {
   Namespace namespace = 1;
   string filename = 2;
   string mime_type = 3;
+  // Must be greater than 0. Empty objects are rejected with invalid_argument.
   uint64 size_bytes = 4;
   uint32 chunk_size_bytes = 5;
   string sha256_digest = 6;

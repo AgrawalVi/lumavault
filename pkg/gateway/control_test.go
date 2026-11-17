@@ -89,14 +89,22 @@ func TestCommitChunkSizeMismatch(t *testing.T) {
 	h.wantNoObjects()
 }
 
-func TestCommitEmptyObject(t *testing.T) {
+func TestCommitEmptyObjectRejected(t *testing.T) {
 	h := newHarness(t)
-	res, err := h.client.CommitObject(context.Background(), commitReq(nil, 0, nil))
-	if err != nil || res.GetObject().GetSizeBytes() != 0 {
-		t.Fatalf("empty commit: %v %v", res, err)
-	}
+	_, err := h.client.CommitObject(context.Background(), commitReq(nil, 0, nil))
+	wantCode(t, err, connect.CodeInvalidArgument)
 	if n := h.chunks.stats.Load(); n != 0 {
 		t.Fatalf("StatChunks called %d times for empty object, want 0", n)
+	}
+	h.wantNoObjects()
+}
+
+func TestLegacyEmptyObjectStillLoads(t *testing.T) {
+	legacy := legacyEmptyObject()
+	h := newHarness(t, legacy)
+	got, err := h.client.GetObject(context.Background(), &lumavaultv1.GetObjectRequest{ObjectId: legacy.GetId()})
+	if err != nil || got.GetObject().GetSizeBytes() != 0 {
+		t.Fatalf("GetObject on stored empty object: %v %v", got, err)
 	}
 }
 
