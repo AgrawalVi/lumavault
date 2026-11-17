@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +247,42 @@ func TestRunConfigErrors(t *testing.T) {
 		t.Setenv(envGCGracePeriod, "forever")
 		if err := run(context.Background(), nil, io.Discard); err == nil {
 			t.Fatal("want error for bad env duration")
+		}
+	})
+}
+
+func TestTicketConfig(t *testing.T) {
+	longSecret := strings.Repeat("s", 32)
+	bad := map[string][2]string{
+		"short secret":       {"too-short", "key"},
+		"secret without key": {longSecret, ""},
+		"key without secret": {"", "key"},
+	}
+	for name, env := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(envTicketSecret, env[0])
+			t.Setenv(envServiceKey, env[1])
+			if _, err := parseConfig([]string{"-data-dir", t.TempDir()}); err == nil {
+				t.Fatalf("parseConfig accepted secret %q and key %q", env[0], env[1])
+			}
+		})
+	}
+
+	t.Run("checks on", func(t *testing.T) {
+		t.Setenv(envTicketSecret, longSecret)
+		t.Setenv(envServiceKey, "key")
+		t.Setenv(envAddr, "127.0.0.1:0")
+		t.Setenv(envDataDir, t.TempDir())
+		t.Setenv(envGCInterval, "0")
+		base := startServer(t)
+		req, _ := http.NewRequest(http.MethodPut, base+"/v1/chunks/"+sha([]byte("x")), strings.NewReader("x"))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("PUT without a ticket: status %d, want 401", res.StatusCode)
 		}
 	})
 }
