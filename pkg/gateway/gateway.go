@@ -17,14 +17,19 @@ import (
 type gateway struct {
 	meta   metadata.MetadataStore
 	chunks chunkstore.ChunkStore
+	// auth is nil when storage ticket checks are off.
+	auth *gatewayAuth
 }
 
 var _ lumavaultv1connect.StorageServiceHandler = (*gateway)(nil)
 
 // NewHandler returns the full Gateway HTTP handler: Connect, gRPC, and gRPC-Web routes for
 // StorageService, the chunk and stream data plane routes, GET /healthz, and CORS.
-func NewHandler(meta metadata.MetadataStore, chunks chunkstore.ChunkStore) http.Handler {
+func NewHandler(meta metadata.MetadataStore, chunks chunkstore.ChunkStore, opts ...Option) http.Handler {
 	gw := &gateway{meta: meta, chunks: chunks}
+	for _, opt := range opts {
+		opt(gw)
+	}
 
 	server := connect.NewServer()
 	lumavaultv1connect.RegisterStorageServiceHandler(server, gw)

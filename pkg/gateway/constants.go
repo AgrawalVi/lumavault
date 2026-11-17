@@ -54,3 +54,11 @@ const (
 	contentRangeFull = rangeUnitBytes + " %d-%d/%d"
 	contentRangeNone = rangeUnitBytes + " */%d"
 )
+
+// Storage ticket credentials. Clients send a ticket as a Bearer token; apps/api sends the
+// service key in its own header.
+const (
+	headerAuthorization = "Authorization"
+	headerServiceKey    = "X-LumaVault-Service-Key"
+	bearerScheme        = "bearer"
+)
