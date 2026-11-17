@@ -19,3 +19,10 @@ export const PASSKEY_RP_NAME = "LumaVault";
 
 // Better Auth routes clients may never call. IamService does these actions server-side.
 export const LOCKED_AUTH_PREFIXES = ["/organization/", "/admin/"] as const;
+
+// Storage tickets: the format is fixed by the storage tickets scoping doc and checked against
+// sdk/testdata/ticket-vectors.json, which the Go Gateway also passes.
+export const TICKET_PREFIX = "v1.";
+export const UPLOAD_TICKET_TTL_SECONDS = 24 * 60 * 60;
+export const READ_TICKET_TTL_SECONDS = 6 * 60 * 60;
+export const TICKET_CLOCK_SKEW_SECONDS = 30;
