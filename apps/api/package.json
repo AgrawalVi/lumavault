@@ -6,15 +6,20 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "db:push": "tsx src/db/ensure-schemas.ts && drizzle-kit push"
+    "db:push": "tsx src/db/ensure-schemas.ts && drizzle-kit push",
+    "auth:generate": "tsx src/auth/generate-schema.ts",
+    "auth:check": "tsx src/auth/generate-schema.ts --check"
   },
   "dependencies": {
+    "@better-auth/passkey": "^1.7.25",
+    "better-auth": "^1.7.25",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
+    "auth": "^1.7.25",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
