@@ -56,6 +56,7 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
    - Validation, URL building, HTTP/body helpers, concurrency primitives, and other utilities live in their own focused modules, not inside the client or service they support.
    - One canonical implementation per helper (one hash validator, one object ID validator, one fetch resolver). Do not duplicate helpers across files with drifting rules.
    - One public entrypoint per package (`index.ts`, the Go package itself). Internal modules do not re-export each other's symbols.
+   - In `apps/api`, import across folders with the `#/` alias (for example `#/auth/role-checks.js`), never `../`. Keep `./` for files in the same folder. The `.js` ending is required: Node runs the compiled files, so the specifier names the output file. Compiled output must run through `pnpm start`, which passes `--conditions=@lumavault/dist` so the alias points at `dist/`.
    - Split any file that mixes orchestration with helpers or grows past roughly 300 lines of non-test code.
 3. **The user makes design decisions, not the agent.** Whenever work reaches a fork (API shape, error model, wire contract, file/module layout, dependency choice, default values, naming of public symbols, behavior the spec does not pin down), stop and ask a clarifying question with the concrete options and their trade-offs before writing code. Do not pick a default silently and move on, and do not invent wire contracts (HTTP response bodies, headers, error strings) that the Gateway or `proto/` does not already define.
 
