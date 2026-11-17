@@ -4,12 +4,14 @@ import { createAuth } from "#/auth/auth.js";
 import { loadConfig } from "#/config.js";
 import * as authTables from "#/db/schemas/auth.js";
 import type { TestDatabase } from "#/db/testing.js";
-import { createEmailService } from "#/email/emails.js";
+import { createEmailService, type EmailService } from "#/email/emails.js";
 import { createMailer } from "#/email/mailer.js";
 import type { ModuleContext } from "#/modules.js";
 import { requestKey } from "#/request.js";
 
 export const TEST_WEB_ORIGIN = "http://localhost:3000";
+// Portal, Photos, Cinema, and Arcade.
+export const TEST_APP_ORIGINS = [TEST_WEB_ORIGIN, "http://localhost:3001", "http://localhost:3002", "http://localhost:3003"];
 
 export const TEST_ENV = {
   NODE_ENV: "test",
@@ -18,13 +20,34 @@ export const TEST_ENV = {
   LUMAVAULT_TICKET_SECRET: "test-ticket-secret-that-is-32-bytes-or-more",
   LUMAVAULT_SERVICE_KEY: "test-service-key",
   BETTER_AUTH_SECRET: "test-auth-secret-that-is-32-bytes-or-more",
-  LUMAVAULT_WEB_ORIGINS: TEST_WEB_ORIGIN,
+  LUMAVAULT_WEB_ORIGINS: TEST_APP_ORIGINS.join(","),
   LUMAVAULT_PORTAL_URL: TEST_WEB_ORIGIN,
 };
 
+/** Records every email instead of sending it. */
+export function recordingEmail(): EmailService & { sent: { kind: string; to: string; url: string }[] } {
+  const sent: { kind: string; to: string; url: string }[] = [];
+  return {
+    sent,
+    async sendMagicLink(to, props) {
+      sent.push({ kind: "magic-link", to, url: props.url });
+    },
+    async sendMemberInvite(to, props) {
+      sent.push({ kind: "member-invite", to, url: props.url });
+    },
+    async sendHouseholdInvite(to, props) {
+      sent.push({ kind: "household-invite", to, url: props.url });
+    },
+  };
+}
+
 /** A ModuleContext on a test database, with Better Auth wired to its tables. */
-export function createTestContext(database: Pick<TestDatabase, "db">, env: Record<string, string> = {}): ModuleContext {
-  const config = loadConfig({ ...TEST_ENV, ...env });
+export function createTestContext(
+  database: Pick<TestDatabase, "db">,
+  options: { env?: Record<string, string>; email?: EmailService } = {},
+): ModuleContext {
+  const config = loadConfig({ ...TEST_ENV, ...options.env });
+  const email = options.email ?? createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
   const auth = createAuth({
     db: database.db,
     tables: authTables,
@@ -32,9 +55,8 @@ export function createTestContext(database: Pick<TestDatabase, "db">, env: Recor
     baseURL: config.apiUrl,
     trustedOrigins: config.webOrigins,
     passkeyRpID: "localhost",
-    sendMagicLink: async () => {},
+    sendMagicLink: ({ email: to, url }) => email.sendMagicLink(to, { url }),
   });
-  const email = createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
   return { config, db: database.db, auth, email };
 }
 

@@ -1,6 +1,7 @@
 import { type ContextValues, createContextKey } from "@connectrpc/connect";
 import { SUPER_ADMIN_ROLE } from "./auth/constants.js";
 import { hasUserRole } from "./auth/role-checks.js";
+import { isBanned } from "./auth/session-policy.js";
 import { getHouseholdByUserId } from "./data/iam/household/get-household.js";
 import type { HouseholdMembership } from "./data/iam/household/types.js";
 import type { ModuleContext } from "./modules.js";
@@ -41,7 +42,7 @@ async function resolve(values: ContextValues, ctx: ModuleContext): Promise<Reque
     return { viewer: null, household: null };
   }
   const session = await ctx.auth.api.getSession({ headers: request.headers });
-  if (!session) {
+  if (!session || isBanned(session.user)) {
     return { viewer: null, household: null };
   }
   const viewer: Viewer = {
