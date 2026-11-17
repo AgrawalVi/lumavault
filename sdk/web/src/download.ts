@@ -21,19 +21,19 @@ export function verifiedStream(
   signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   let meta: ObjectMetadata;
-  let whole: Awaited<ReturnType<typeof createSHA256>>;
+  let fileHasher: Awaited<ReturnType<typeof createSHA256>>;
   let index = 0;
 
   return new ReadableStream<Uint8Array>(
     {
       async start() {
         meta = await object;
-        whole = await createSHA256();
-        whole.init();
+        fileHasher = await createSHA256();
+        fileHasher.init();
       },
       async pull(controller) {
         if (index === meta.chunkHashes.length) {
-          if (whole.digest("hex") !== meta.sha256Digest) {
+          if (fileHasher.digest("hex") !== meta.sha256Digest) {
             throw hashMismatch(`object ${meta.id}`);
           }
           controller.close();
@@ -44,7 +44,7 @@ export function verifiedStream(
         if (toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))) !== expected) {
           throw hashMismatch(`chunk ${index} of object ${meta.id}`);
         }
-        whole.update(bytes);
+        fileHasher.update(bytes);
         index++;
         controller.enqueue(bytes);
       },
