@@ -8,12 +8,13 @@ struct DataPlane: Sendable {
 
     /// Uploads bytes [offset, offset+length) of a file as one chunk. The range is copied to a
     /// temporary file in small pieces and sent from disk, so a 64 MiB chunk never sits in memory.
-    func putChunk(sha256: String, file: URL, offset: UInt64, length: Int) async throws {
+    func putChunk(sha256: String, file: URL, offset: UInt64, length: Int, ticket: String?) async throws {
         let staged = try stageRange(of: file, offset: offset, length: length)
         defer { try? FileManager.default.removeItem(at: staged) }
 
-        var request = URLRequest(url: chunkURL(baseURL: baseURL, sha256: sha256))
+        var request = URLRequest(url: gatewayChunkURL(baseURL: baseURL, sha256: sha256))
         request.httpMethod = "PUT"
+        TicketAuth.apply(ticket: ticket, to: &request)
         let (body, response) = try await send { try await session.upload(for: request, fromFile: staged) }
         try check(response, body)
 
@@ -25,8 +26,9 @@ struct DataPlane: Sendable {
     }
 
     /// Downloads one whole chunk. The caller verifies its hash.
-    func getChunk(sha256: String) async throws -> Data {
-        let request = URLRequest(url: chunkURL(baseURL: baseURL, sha256: sha256))
+    func getChunk(sha256: String, ticket: String?) async throws -> Data {
+        var request = URLRequest(url: gatewayChunkURL(baseURL: baseURL, sha256: sha256))
+        TicketAuth.apply(ticket: ticket, to: &request)
         let (body, response) = try await send { try await session.data(for: request) }
         try check(response, body)
         return body

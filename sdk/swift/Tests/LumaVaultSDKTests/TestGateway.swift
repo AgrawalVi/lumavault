@@ -22,7 +22,8 @@ final class TestGateway {
         return out
     }
 
-    init() async throws {
+    /// Pass env to turn on storage ticket checks.
+    init(env: [String: String] = [:]) async throws {
         dir = FileManager.default.temporaryDirectory.appending(component: "lumavault-gw-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // Logs go to a file, not a pipe, so a chatty server can never block on a full pipe.
@@ -33,6 +34,7 @@ final class TestGateway {
         process.executableURL = try Self.binary.get()
         process.arguments = ["-addr", "127.0.0.1:0", "-data-dir", dir.appending(component: "data").path]
         process.standardOutput = try FileHandle(forWritingTo: log)
+        process.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
         try process.run()
 
         do {

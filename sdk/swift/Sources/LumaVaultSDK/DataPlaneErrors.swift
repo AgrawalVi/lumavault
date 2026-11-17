@@ -11,6 +11,8 @@ func dataPlaneError(status: Int, body: Data) -> ConnectError {
 func code(forStatus status: Int) -> Code {
     switch status {
     case 400, 413: return .invalidArgument
+    case 401: return .unauthenticated
+    case 403: return .permissionDenied
     case 404: return .notFound
     case 500: return .internalError
     case 500...: return .unavailable
