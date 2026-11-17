@@ -8,6 +8,7 @@ import type { TestDatabase } from "#/db/testing.js";
 import { createEmailService, type EmailService } from "#/email/emails.js";
 import { createMailer } from "#/email/mailer.js";
 import type { ModuleContext } from "#/modules.js";
+import { createStorageGateway, type StorageGateway } from "#/services/storage-gateway.js";
 import { requestKey } from "#/request.js";
 
 export const TEST_WEB_ORIGIN = "http://localhost:3000";
@@ -45,7 +46,7 @@ export function recordingEmail(): EmailService & { sent: { kind: string; to: str
 /** A ModuleContext on a test database, with Better Auth wired to its tables. */
 export function createTestContext(
   database: Pick<TestDatabase, "db">,
-  options: { env?: Record<string, string>; email?: EmailService } = {},
+  options: { env?: Record<string, string>; email?: EmailService; gateway?: StorageGateway } = {},
 ): ModuleContext {
   const config = loadConfig({ ...TEST_ENV, ...options.env });
   const email = options.email ?? createEmailService(createMailer({ from: config.mailFrom, log: () => {} }));
@@ -58,7 +59,9 @@ export function createTestContext(
     passkeyRpID: "localhost",
     sendMagicLink: ({ email: to, url }) => email.sendMagicLink(to, { url }),
   });
-  return { config, db: database.db, auth, email };
+  const gateway =
+    options.gateway ?? createStorageGateway({ baseUrl: config.gatewayUrl, serviceKey: config.serviceKey });
+  return { config, db: database.db, auth, email, gateway };
 }
 
 export interface TestUser {

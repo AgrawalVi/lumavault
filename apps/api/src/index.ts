@@ -8,6 +8,7 @@ import { createDatabase, ensureSchemas } from "./db/index.js";
 import * as authTables from "./db/schemas/auth.js";
 import { createEmailService } from "./email/emails.js";
 import { createMailer } from "./email/mailer.js";
+import { createStorageGateway } from "./services/storage-gateway.js";
 import { loadModules, type ModuleContext, startModules, stopModules } from "./modules.js";
 
 const config = loadConfig(process.env);
@@ -28,7 +29,8 @@ const auth = createAuth({
   cookieDomain: config.cookieDomain,
 });
 
-const ctx: ModuleContext = { config, db: database.db, auth, email };
+const gateway = createStorageGateway({ baseUrl: config.gatewayUrl, serviceKey: config.serviceKey });
+const ctx: ModuleContext = { config, db: database.db, auth, email, gateway };
 const modules = await loadModules();
 const app = createApp(ctx, modules);
 await startModules(modules, ctx);
