@@ -7,7 +7,7 @@ import * as authTables from "#/db/schemas/auth.js";
 import { createTestDatabase, pushAllSchemas, type TestDatabase } from "#/db/testing.js";
 import { createAuth } from "./auth.js";
 import { HOUSEHOLD_OWNER_ROLE } from "./constants.js";
-import { toAuthSchema } from "./generate-schema.js";
+import { toAuthSchema } from "#/tools/generate-auth-schema.js";
 
 const API_DIR = fileURLToPath(new URL("../../", import.meta.url));
 

@@ -1,9 +1,8 @@
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
+import { listSourceFiles } from "#/source-files.js";
 import { DB_SCHEMAS, type DbSchema, SCHEMA_SETUP_LOCK_KEY, SCHEMAS_DIR_NAME } from "./constants.js";
 
 export { DB_SCHEMAS, type DbSchema } from "./constants.js";
@@ -51,7 +50,7 @@ export const SCHEMAS_DIR = fileURLToPath(new URL(`./${SCHEMAS_DIR_NAME}/`, impor
 /** Imports every table file under dir, including subfolders, and merges their exports. */
 export async function loadSchemaModules(dir: string = SCHEMAS_DIR): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
-  for (const file of await schemaFiles(dir)) {
+  for (const file of await listSourceFiles(dir)) {
     const mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>;
     for (const [name, value] of Object.entries(mod)) {
       if (name in merged && merged[name] !== value) {
@@ -61,20 +60,4 @@ export async function loadSchemaModules(dir: string = SCHEMAS_DIR): Promise<Reco
     }
   }
   return merged;
-}
-
-async function schemaFiles(dir: string): Promise<string[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(dir, { recursive: true });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw err;
-  }
-  return entries
-    .filter((f) => /\.(ts|js)$/.test(f) && !/\.d\.ts$|\.test\.(ts|js)$/.test(f))
-    .sort()
-    .map((f) => join(dir, f));
 }

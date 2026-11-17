@@ -180,16 +180,37 @@ importers:
       '@better-auth/passkey':
         specifier: ^1.7.25
         version: 1.7.25(@better-auth/core@1.7.25(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.9)(nanostores@1.5.5))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.25(drizzle-kit@0.31.11)(drizzle-orm@0.45.4(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1))(pg@8.23.1)(vitest@5.1.0(@types/node@22.20.5)(vite@8.3.8(@types/node@22.20.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))))(better-call@1.4.5(zod@4.6.7))(nanostores@1.5.5)
+      '@bufbuild/protobuf':
+        specifier: ^2.17.0
+        version: 2.17.0
+      '@connectrpc/connect':
+        specifier: ^2.3.0
+        version: 2.3.0(@bufbuild/protobuf@2.17.0)
+      '@hono/node-server':
+        specifier: ^2.1.8
+        version: 2.1.8(hono@4.13.19)
+      '@lumavault/sdk':
+        specifier: workspace:*
+        version: link:../../sdk/web
       better-auth:
         specifier: ^1.7.25
         version: 1.7.25(drizzle-kit@0.31.11)(drizzle-orm@0.45.4(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1))(pg@8.23.1)(vitest@5.1.0(@types/node@22.20.5)(vite@8.3.8(@types/node@22.20.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
+      hono:
+        specifier: ^4.13.19
+        version: 4.13.19
       pg:
         specifier: ^8.23.1
         version: 8.23.1
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
+      '@connectrpc/connect-web':
+        specifier: ^2.3.0
+        version: 2.3.0(@bufbuild/protobuf@2.17.0)(@connectrpc/connect@2.3.0(@bufbuild/protobuf@2.17.0))
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
@@ -988,6 +1009,12 @@ packages:
   '@hexagon/base64@1.1.28':
     resolution: {integrity: sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw==}
 
+  '@hono/node-server@2.1.8':
+    resolution: {integrity: sha512-jdf7FHh6A1lzjpHHQUgxsg2GeER2vMetnAOfeActzcoli6jamlK+NAwL6Dsr5Fl3BS3tYUQzCdtZjU8Qxv7bEA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      hono: ^4 || ^5.0.0-0
+
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
 
@@ -1566,6 +1593,10 @@ packages:
 
   hash-wasm@4.13.0:
     resolution: {integrity: sha512-GrWl7wsV46fKIXQZB5ebskLZLAmKL6d9RS0fspCxDeQyjoNu1AfTJTMLPOJyfzaQm0ldFiwFN21/w+sE/kgEFQ==}
+
+  hono@4.13.19:
+    resolution: {integrity: sha512-KmXvQAXwcAHV+muzbIwoJ23niEB5nMoDVr9WcRkU8mvjUECm/1+7v4Jgp7P7a+H6MLFrh+vXrGonGrGS+RQfkA==}
+    engines: {node: '>=16.9.0'}
 
   is-docker@3.0.0:
     resolution: {integrity: sha512-eljcgEDlEns/7AXFosB5K/2nCM4P7FQPkGc/DWLy5rmFEWvZayGrik1d9/QIY5nJ4f9YsVvBkA6kJpHn9rISdQ==}
@@ -2608,6 +2639,10 @@ snapshots:
 
   '@hexagon/base64@1.1.28': {}
 
+  '@hono/node-server@2.1.8(hono@4.13.19)':
+    dependencies:
+      hono: 4.13.19
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
@@ -3150,6 +3185,8 @@ snapshots:
       resolve-pkg-maps: 1.0.0
 
   hash-wasm@4.13.0: {}
+
+  hono@4.13.19: {}
 
   is-docker@3.0.0: {}
 
