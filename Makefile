@@ -1,47 +1,71 @@
 BUF ?= $(shell command -v buf 2>/dev/null || echo $(shell go env GOPATH)/bin/buf)
-PROTO_STAMPS := \
-	gen/go/lumavault/v1/storage.pb.go \
-	sdk/web/src/gen/lumavault/v1/storage_pb.ts \
-	sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.pb.swift
+PNPM ?= pnpm
 
-.PHONY: proto build test lint run clean
+# Regenerate stubs whenever any proto or buf config changes. The stamp lives in gen/, which
+# make clean removes along with the stubs.
+PROTO_SRCS := $(shell find proto -name '*.proto')
+PROTO_STAMP := gen/.proto-stamp
+
+# pnpm writes this file on every successful install.
+JS_DEPS := node_modules/.modules.yaml
+JS_MANIFESTS := package.json pnpm-workspace.yaml pnpm-lock.yaml \
+	$(wildcard sdk/web/package.json packages/*/package.json apps/*/package.json apps/*/web/package.json)
+
+# Workspace packages import the SDK from its build output, so build it first.
+SDK_BUILD := sdk/web/dist/index.js
+SDK_SRCS := $(shell find sdk/web/src -name '*.ts' -not -name '*.test.ts' 2>/dev/null)
+
+.PHONY: proto build test lint run clean \
+	lint-go lint-js lint-swift test-go test-js test-swift
 
 proto:
 	$(BUF) lint
 	$(BUF) generate
+	$(BUF) generate --template buf.gen.go.yaml --path proto/lumavault/v1
+	@mkdir -p gen && touch $(PROTO_STAMP)
 
-gen/go/lumavault/v1/storage.pb.go: proto/lumavault/v1/storage.proto buf.yaml buf.gen.yaml
+$(PROTO_STAMP): $(PROTO_SRCS) buf.yaml buf.gen.yaml buf.gen.go.yaml
 	$(BUF) generate
+	$(BUF) generate --template buf.gen.go.yaml --path proto/lumavault/v1
+	@mkdir -p gen && touch $@
 
-sdk/web/src/gen/lumavault/v1/storage_pb.ts: gen/go/lumavault/v1/storage.pb.go
-	@test -f $@ || $(BUF) generate
+$(JS_DEPS): $(JS_MANIFESTS)
+	$(PNPM) install --frozen-lockfile
+	@touch $@
 
-sdk/swift/Sources/LumaVaultSDK/Gen/lumavault/v1/storage.pb.swift: sdk/web/src/gen/lumavault/v1/storage_pb.ts
-	@test -f $@ || $(BUF) generate
+$(SDK_BUILD): $(PROTO_STAMP) $(JS_DEPS) $(SDK_SRCS) sdk/web/tsconfig.json sdk/web/tsconfig.build.json
+	$(PNPM) --filter @lumavault/sdk run build
 
-sdk/web/node_modules: sdk/web/package.json
-	npm --prefix sdk/web install --no-package-lock
-	@touch sdk/web/node_modules
-
-build: $(PROTO_STAMPS) sdk/web/node_modules
+build: $(PROTO_STAMP) $(SDK_BUILD)
 	@mkdir -p bin
 	go build -o bin/lumavault ./cmd/lumavault
-	npm --prefix sdk/web run build
+	$(PNPM) -r --if-present run build
 	swift build
 
-test: $(PROTO_STAMPS) sdk/web/node_modules
-	go test -race ./...
-	npm --prefix sdk/web run typecheck
-	npm --prefix sdk/web test
-	swift test
+lint: lint-go lint-js lint-swift
 
-lint: $(PROTO_STAMPS) sdk/web/node_modules
+lint-go: $(PROTO_STAMP)
 	$(BUF) lint
 	go vet ./...
-	npm --prefix sdk/web run typecheck
+
+lint-js: $(SDK_BUILD)
+	$(PNPM) -r --if-present run typecheck
+
+lint-swift: $(PROTO_STAMP)
 	swift build
 
-run: $(PROTO_STAMPS)
+test: test-go test-js test-swift
+
+test-go: $(PROTO_STAMP)
+	go test -race ./...
+
+test-js: $(SDK_BUILD)
+	$(PNPM) -r --if-present run test
+
+test-swift: $(PROTO_STAMP)
+	swift test
+
+run: $(PROTO_STAMP)
 	go run ./cmd/lumavault
 
 clean:

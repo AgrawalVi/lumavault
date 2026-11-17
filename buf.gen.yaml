@@ -1,3 +1,5 @@
+# TypeScript and Swift stubs for every proto. Go stubs come from buf.gen.go.yaml, which is
+# limited to proto/lumavault/v1.
 version: v2
 managed:
   enabled: true
@@ -5,16 +7,6 @@ managed:
     - file_option: go_package_prefix
       value: github.com/lumavault/lumavault/gen/go
 plugins:
-  # Go Protobuf & Connect-RPC server/client stubs
-  - remote: buf.build/protocolbuffers/go
-    out: gen/go
-    opt:
-      - paths=source_relative
-  - remote: buf.build/connectrpc/go
-    out: gen/go
-    opt:
-      - paths=source_relative
-
   # Web / TypeScript Protobuf v2 & Connect-ES service descriptors
   - remote: buf.build/bufbuild/es
     out: sdk/web/src/gen

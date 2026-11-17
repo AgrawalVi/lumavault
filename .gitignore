@@ -22,9 +22,9 @@ DerivedData/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
 
-# Node / Web SDK
+# Node / Web SDK & workspace packages
 node_modules/
-sdk/web/dist/
+dist/
 .turbo/
 
 # Local runtime data & secrets

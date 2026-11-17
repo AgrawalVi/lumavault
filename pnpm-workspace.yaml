@@ -1,0 +1,7 @@
+# Every JavaScript package in the repo. Apps and packages are picked up as soon as their
+# directory has a package.json.
+packages:
+  - sdk/web
+  - packages/*
+  - apps/*
+  - apps/*/web
