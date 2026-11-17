@@ -8,3 +8,12 @@ enum ChunkingConstants {
     // Files are read in pieces this size so memory stays flat no matter how big a chunk is.
     static let readBufferBytes = 1024 * 1024
 }
+
+// Chunk uploads in flight at once, matching the web SDK default.
+let defaultUploadConcurrency = 4
+
+// Gateway data plane routes, relative to the gateway base URL.
+enum GatewayRoutes {
+    static let chunks = "v1/chunks"
+    static let stream = "v1/stream"
+}

@@ -59,6 +59,11 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The Swift integration tests build and run cmd/lumavault.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Generate Protobuf stubs
         run: buf generate
 

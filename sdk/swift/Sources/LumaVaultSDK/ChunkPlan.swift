@@ -14,7 +14,10 @@ struct ChunkPlan: Equatable, Sendable {
 
 /// Splits the file into chunks and hashes each chunk and the whole file in one pass.
 /// The file is read in small pieces, so memory stays flat even for multi-gigabyte files.
-func planChunks(fileURL: URL) throws -> ChunkPlan {
+func planChunks(
+    fileURL: URL,
+    onHashed: ((_ hashedBytes: UInt64, _ totalBytes: UInt64) -> Void)? = nil
+) throws -> ChunkPlan {
     let handle = try FileHandle(forReadingFrom: fileURL)
     defer { try? handle.close() }
 
@@ -29,6 +32,7 @@ func planChunks(fileURL: URL) throws -> ChunkPlan {
     var chunkHasher = SHA256()
     var chunkHashes: [String] = []
     var bytesInChunk = 0
+    var hashedBytes: UInt64 = 0
 
     while true {
         let wanted = min(ChunkingConstants.readBufferBytes, chunkSizeBytes - bytesInChunk)
@@ -36,14 +40,17 @@ func planChunks(fileURL: URL) throws -> ChunkPlan {
         fileHasher.update(data: piece)
         chunkHasher.update(data: piece)
         bytesInChunk += piece.count
+        hashedBytes += UInt64(piece.count)
         if bytesInChunk == chunkSizeBytes {
             chunkHashes.append(chunkHasher.finalize().lowercaseHex)
             chunkHasher = SHA256()
             bytesInChunk = 0
+            onHashed?(hashedBytes, sizeBytes)
         }
     }
     if bytesInChunk > 0 {
         chunkHashes.append(chunkHasher.finalize().lowercaseHex)
+        onHashed?(hashedBytes, sizeBytes)
     }
 
     return ChunkPlan(
