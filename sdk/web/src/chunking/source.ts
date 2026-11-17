@@ -7,6 +7,10 @@ export interface ByteSource {
   read(start: number, end: number): Promise<Uint8Array<ArrayBuffer>>;
 }
 
+/**
+ * Wraps a Blob or Uint8Array behind one reader so the planner and uploader never branch on the
+ * input type. Blob reads load only the requested slice; Uint8Array reads are zero-copy views.
+ */
 export function toByteSource(input: UploadInput): ByteSource {
   if (input instanceof Uint8Array) {
     return {

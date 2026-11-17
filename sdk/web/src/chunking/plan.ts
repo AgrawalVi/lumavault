@@ -25,15 +25,15 @@ export async function planChunks(input: UploadInput): Promise<ChunkPlan> {
   }
 
   const chunkSizeBytes = chunkSizeFor(source.size);
-  const whole = await createSHA256();
-  whole.init();
+  const fileHasher = await createSHA256();
+  fileHasher.init();
   const chunkHashes: string[] = [];
 
-  for (let start = 0; start < source.size; start += chunkSizeBytes) {
-    const bytes = await source.read(start, Math.min(start + chunkSizeBytes, source.size));
-    whole.update(bytes);
+  for (let pos = 0; pos < source.size; pos += chunkSizeBytes) {
+    const bytes = await source.read(pos, Math.min(pos + chunkSizeBytes, source.size));
+    fileHasher.update(bytes);
     chunkHashes.push(toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))));
   }
 
-  return { sizeBytes: source.size, chunkSizeBytes, sha256Digest: whole.digest("hex"), chunkHashes };
+  return { sizeBytes: source.size, chunkSizeBytes, sha256Digest: fileHasher.digest("hex"), chunkHashes };
 }
