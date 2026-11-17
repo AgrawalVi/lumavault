@@ -25,31 +25,31 @@ func planChunks(fileURL: URL) throws -> ChunkPlan {
     try handle.seek(toOffset: 0)
 
     let chunkSizeBytes = chunkSize(forFileSize: sizeBytes)
-    var whole = SHA256()
-    var chunk = SHA256()
+    var fileHasher = SHA256()
+    var chunkHasher = SHA256()
     var chunkHashes: [String] = []
     var bytesInChunk = 0
 
     while true {
         let wanted = min(ChunkingConstants.readBufferBytes, chunkSizeBytes - bytesInChunk)
         guard let piece = try handle.read(upToCount: wanted), !piece.isEmpty else { break }
-        whole.update(data: piece)
-        chunk.update(data: piece)
+        fileHasher.update(data: piece)
+        chunkHasher.update(data: piece)
         bytesInChunk += piece.count
         if bytesInChunk == chunkSizeBytes {
-            chunkHashes.append(chunk.finalize().lowercaseHex)
-            chunk = SHA256()
+            chunkHashes.append(chunkHasher.finalize().lowercaseHex)
+            chunkHasher = SHA256()
             bytesInChunk = 0
         }
     }
     if bytesInChunk > 0 {
-        chunkHashes.append(chunk.finalize().lowercaseHex)
+        chunkHashes.append(chunkHasher.finalize().lowercaseHex)
     }
 
     return ChunkPlan(
         sizeBytes: sizeBytes,
         chunkSizeBytes: chunkSizeBytes,
-        sha256Digest: whole.finalize().lowercaseHex,
+        sha256Digest: fileHasher.finalize().lowercaseHex,
         chunkHashes: chunkHashes
     )
 }
