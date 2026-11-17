@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DEFAULT_PORT, MIN_SECRET_BYTES } from "./constants.js";
+import { DEFAULT_MAIL_FROM } from "./email/constants.js";
 
 const secret = (isTest: boolean) =>
   z
@@ -34,6 +35,7 @@ function schema(isTest: boolean) {
     LUMAVAULT_ADMIN_EMAIL: z.email().optional(),
     LUMAVAULT_COOKIE_DOMAIN: optional,
     SMTP_URL: optional,
+    LUMAVAULT_MAIL_FROM: optional,
   });
 }
 
@@ -52,6 +54,8 @@ export interface Config {
   adminEmail?: string;
   cookieDomain?: string;
   smtpUrl?: string;
+  /** Sender for every email, for example "LumaVault <no-reply@example.com>". */
+  mailFrom: string;
 }
 
 /** Reads and checks config from the environment. Throws one error listing every problem. */
@@ -76,5 +80,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     adminEmail: e.LUMAVAULT_ADMIN_EMAIL?.toLowerCase(),
     cookieDomain: e.LUMAVAULT_COOKIE_DOMAIN,
     smtpUrl: e.SMTP_URL,
+    mailFrom: e.LUMAVAULT_MAIL_FROM ?? DEFAULT_MAIL_FROM,
   };
 }

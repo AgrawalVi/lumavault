@@ -3,7 +3,9 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
@@ -11,7 +13,13 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "jsx": "react-jsx"
   },
-  "include": ["src/**/*", "drizzle.config.ts"]
+  "include": [
+    "src/**/*",
+    "drizzle.config.ts"
+  ]
 }
