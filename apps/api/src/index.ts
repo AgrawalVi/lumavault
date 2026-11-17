@@ -1,0 +1,59 @@
+// Server entry: reads config, loads modules, serves on PORT, and shuts down cleanly.
+import { serve } from "@hono/node-server";
+import { createApp } from "./app.js";
+import { createAuth } from "./auth/auth.js";
+import { loadConfig } from "./config.js";
+import { SHUTDOWN_TIMEOUT_MS } from "./constants.js";
+import { createDatabase, ensureSchemas } from "./db/index.js";
+import * as authTables from "./db/schemas/auth.js";
+import { loadModules, type ModuleContext, startModules, stopModules } from "./modules.js";
+
+const config = loadConfig(process.env);
+const database = createDatabase(config.databaseUrl);
+await ensureSchemas(database.db);
+
+const auth = createAuth({
+  db: database.db,
+  tables: authTables,
+  secret: config.authSecret,
+  baseURL: config.apiUrl,
+  trustedOrigins: config.webOrigins,
+  passkeyRpID: new URL(config.portalUrl).hostname,
+  // Until the mailer lands, print links so local sign-in still works.
+  sendMagicLink: async ({ email, url }) => console.info(`magic link for ${email}: ${url}`),
+});
+
+const ctx: ModuleContext = { config, db: database.db, auth };
+const modules = await loadModules();
+const app = createApp(ctx, modules);
+await startModules(modules, ctx);
+
+const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+  console.info(`api listening on port ${info.port} with ${modules.length} modules`);
+});
+
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  console.info(`${signal} received, shutting down`);
+  const forceExit = setTimeout(() => {
+    console.error("shutdown timed out");
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
+  try {
+    await stopModules(modules);
+  } catch (err) {
+    console.error(err);
+  }
+  // close waits for open requests to finish before the pool goes away.
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await database.close();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
