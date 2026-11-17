@@ -13,17 +13,17 @@ import Testing
         DataPlane(baseURL: base, session: URLSession(configuration: StubURLProtocol.session()))
     }
 
-    @Test(arguments: [(400, Code.invalidArgument), (404, .notFound), (413, .invalidArgument), (500, .internalError), (503, .unavailable)])
+    @Test(arguments: [(400, Code.invalidArgument), (401, .unauthenticated), (403, .permissionDenied), (404, .notFound), (413, .invalidArgument), (500, .internalError), (503, .unavailable)])
     func mapsStatusToConnectCode(status: Int, expected: Code) async {
         StubURLProtocol.handler = { _ in (status, Data(#"{"error":"boom"}"#.utf8)) }
-        let error = await #expect(throws: ConnectError.self) { try await dataPlane().getChunk(sha256: hash) }
+        let error = await #expect(throws: ConnectError.self) { try await dataPlane().getChunk(sha256: hash, ticket: nil) }
         #expect(error?.code == expected)
         #expect(error?.message == "boom")
     }
 
     @Test func buildsRoutesWithOrWithoutTrailingSlash() {
         for base in ["http://gw:8080", "http://gw:8080/"].map({ URL(string: $0)! }) {
-            #expect(chunkURL(baseURL: base, sha256: "ab12").absoluteString == "http://gw:8080/v1/chunks/ab12")
+            #expect(gatewayChunkURL(baseURL: base, sha256: "ab12").absoluteString == "http://gw:8080/v1/chunks/ab12")
             #expect(gatewayStreamURL(baseURL: base, objectID: "obj/1").absoluteString == "http://gw:8080/v1/stream/obj%2F1")
         }
     }
@@ -50,7 +50,7 @@ import Testing
 
         let destination = FileManager.default.temporaryDirectory.appending(component: "dl-\(UUID().uuidString)")
         let error = await #expect(throws: ConnectError.self) {
-            try await downloadVerified(object: object, dataPlane: dataPlane(), to: destination)
+            try await downloadVerified(object: object, dataPlane: dataPlane(), to: destination, ticket: nil)
         }
         #expect(error?.code == .dataLoss)
         #expect(!FileManager.default.fileExists(atPath: destination.path))

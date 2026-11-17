@@ -12,8 +12,10 @@ func uploadFile(
     filename: String?,
     mimeType: String?,
     concurrency: Int,
+    ticket: String?,
     progress: (@Sendable (UploadProgress) -> Void)?
 ) async throws -> ObjectMetadata {
+    let headers = TicketAuth.rpcHeaders(ticket: ticket)
     let plan = try planChunks(fileURL: fileURL) { loaded, total in
         progress?(UploadProgress(phase: .hashing, loaded: loaded, total: total))
     }
@@ -21,7 +23,7 @@ func uploadFile(
 
     var hasRequest = Lumavault_V1_HasChunksRequest()
     hasRequest.chunkHashes = plan.chunkHashes
-    let missing = Set(try await rpc.hasChunks(request: hasRequest).unwrap().missingChunkHashes)
+    let missing = Set(try await rpc.hasChunks(request: hasRequest, headers: headers).unwrap().missingChunkHashes)
     let toSend = uniqueChunkIndexes(plan).filter { missing.contains(plan.chunkHashes[$0]) }
 
     // Chunks the gateway already has count as loaded straight away.
@@ -39,7 +41,8 @@ func uploadFile(
                     sha256: plan.chunkHashes[index],
                     file: fileURL,
                     offset: UInt64(index) * UInt64(plan.chunkSizeBytes),
-                    length: Int(chunkLength(plan, index))
+                    length: Int(chunkLength(plan, index)),
+                    ticket: ticket
                 )
                 return index
             }
@@ -61,7 +64,7 @@ func uploadFile(
     commit.sha256Digest = plan.sha256Digest
     commit.chunkHashes = plan.chunkHashes
     commit.skipDedup = true
-    let response = try await rpc.commitObject(request: commit).unwrap()
+    let response = try await rpc.commitObject(request: commit, headers: headers).unwrap()
     guard response.hasObject else {
         throw ConnectError(code: .internalError, message: "gateway returned no object for CommitObject")
     }

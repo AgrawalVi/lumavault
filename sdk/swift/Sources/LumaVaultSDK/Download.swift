@@ -4,7 +4,7 @@ import Foundation
 /// Downloads an object's chunks into a file, checking each chunk and then the whole file.
 /// Bytes land in a temporary file first, so a failed download never leaves a partial file
 /// at the destination. Only one chunk is in memory at a time.
-func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destination: URL) async throws {
+func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destination: URL, ticket: String?) async throws {
     let staging = destination.deletingLastPathComponent()
         .appending(component: ".\(destination.lastPathComponent).lumavault-\(UUID().uuidString)")
     FileManager.default.createFile(atPath: staging.path, contents: nil)
@@ -18,7 +18,7 @@ func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destinati
     do {
         for (index, expected) in object.chunkHashes.enumerated() {
             try Task.checkCancellation()
-            let bytes = try await dataPlane.getChunk(sha256: expected)
+            let bytes = try await dataPlane.getChunk(sha256: expected, ticket: ticket)
             guard SHA256.hash(data: bytes).lowercaseHex == expected else {
                 throw hashMismatch("chunk \(index) of object \(object.id)")
             }
