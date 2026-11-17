@@ -71,6 +71,8 @@ Write so a reader new to the area understands it on the first read. Simple beats
 - Use bold rarely. Do not bold every bullet label.
 - Define an unfamiliar term once, in plain words, the first time it appears.
 - An issue fits on one screen. If it does not, split it.
+- Size each issue as one reviewable PR with one concern: one flow, one group of tables, one group of RPCs, or one page. That is usually 2 to 5 owned files.
+- Keep setup and plumbing in separate issues from business logic, and give each business flow its own issue.
 
 Issue template:
 
