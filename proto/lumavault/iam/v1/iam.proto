@@ -1,0 +1,498 @@
+syntax = "proto3";
+
+package lumavault.iam.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// IamService is the single front door for identity, households, quotas, Apple TV pairing,
+// and upload tickets. It is served by apps/api, which calls Better Auth server-side, so
+// clients never call Better Auth's household endpoints directly. Every byte count is
+// 64-bit. Read-only calls are marked side-effect-free so browsers can send them as GET.
+service IamService {
+  // Setup and viewer context.
+
+  // Reports whether the instance still needs first-run setup. Callable without a session.
+  rpc GetSetupStatus(GetSetupStatusRequest) returns (GetSetupStatusResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Creates the first account, makes it Super-Admin, creates its household, and signs it in.
+  // Runs only while no Super-Admin exists.
+  rpc CompleteSetup(CompleteSetupRequest) returns (CompleteSetupResponse);
+
+  // Returns who is signed in, their households, and the active household's allowance and usage.
+  rpc GetViewer(GetViewerRequest) returns (GetViewerResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Switches the active household on the server session, which all web apps share.
+  rpc SetActiveHousehold(SetActiveHouseholdRequest) returns (SetActiveHouseholdResponse);
+
+  // Super-Admin controls.
+
+  // Creates a single-use household creation invite with a preset allowance.
+  rpc CreateHouseholdInvite(CreateHouseholdInviteRequest) returns (CreateHouseholdInviteResponse);
+
+  // Lists household creation invites that are not yet redeemed, revoked, or expired.
+  rpc ListHouseholdInvites(ListHouseholdInvitesRequest) returns (ListHouseholdInvitesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc RevokeHouseholdInvite(RevokeHouseholdInviteRequest) returns (RevokeHouseholdInviteResponse);
+
+  // Lists every household with its allowance, usage, and member count.
+  rpc ListHouseholds(ListHouseholdsRequest) returns (ListHouseholdsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Changes a household's storage cap, enabled apps, or member limit. Values below current
+  // usage are allowed; they only block new uploads and invites.
+  rpc UpdateHouseholdAllowance(UpdateHouseholdAllowanceRequest) returns (UpdateHouseholdAllowanceResponse);
+
+  // Suspends or reactivates a household. A suspended household keeps its data but blocks
+  // its own app routes.
+  rpc SetHouseholdSuspended(SetHouseholdSuspendedRequest) returns (SetHouseholdSuspendedResponse);
+
+  // Lists accounts on the instance, optionally filtered by name or email.
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Bans a user, revoking their sessions and pending invites at once.
+  rpc BanUser(BanUserRequest) returns (BanUserResponse);
+
+  rpc UnbanUser(UnbanUserRequest) returns (UnbanUserResponse);
+
+  // Households, members, and contributor grants.
+
+  // Creates a household from a household creation invite. The caller becomes its Admin.
+  rpc RedeemHouseholdInvite(RedeemHouseholdInviteRequest) returns (RedeemHouseholdInviteResponse);
+
+  // Lists the active household's members, pending member invites, and free seats.
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Invites someone by email to the active household. Pending invites count toward the
+  // member limit. Admin only.
+  rpc InviteMember(InviteMemberRequest) returns (InviteMemberResponse);
+
+  rpc CancelMemberInvite(CancelMemberInviteRequest) returns (CancelMemberInviteResponse);
+
+  // Joins the household of a member invite addressed to the caller's email.
+  rpc AcceptMemberInvite(AcceptMemberInviteRequest) returns (AcceptMemberInviteResponse);
+
+  // Removes a member. The last Admin cannot be removed. Admin only.
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+
+  // Changes a member's role. The last Admin cannot be demoted. Admin only.
+  rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (UpdateMemberRoleResponse);
+
+  // Lets someone outside the household add to one shared resource, such as a Photos album.
+  // Their uploads are billed to the granting household.
+  rpc CreateContributorGrant(CreateContributorGrantRequest) returns (CreateContributorGrantResponse);
+
+  // Lists grants the active household has issued, or with mine set, grants issued to the caller.
+  rpc ListContributorGrants(ListContributorGrantsRequest) returns (ListContributorGrantsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc RevokeContributorGrant(RevokeContributorGrantRequest) returns (RevokeContributorGrantResponse);
+
+  // Apple TV pairing.
+
+  // Called by the Apple TV without a session. Returns a short code to show on screen and a
+  // device secret that only the Apple TV keeps.
+  rpc StartPairing(StartPairingRequest) returns (StartPairingResponse);
+
+  // Called by a signed-in user on their phone to approve the code shown on the Apple TV.
+  rpc ApprovePairing(ApprovePairingRequest) returns (ApprovePairingResponse);
+
+  // Polled by the Apple TV. Returns the bearer session token exactly once after approval.
+  rpc PollPairing(PollPairingRequest) returns (PollPairingResponse);
+
+  // Uploads.
+
+  // Reserves bytes against the target's quota and returns a signed upload ticket for the
+  // Storage Gateway. The app's own finish call claims the object and refunds the rest.
+  rpc PrepareUpload(PrepareUploadRequest) returns (PrepareUploadResponse);
+
+  // Releases a reservation that will not be finished.
+  rpc CancelUpload(CancelUploadRequest) returns (CancelUploadResponse);
+}
+
+// App is one of the three media apps a household can have enabled.
+enum App {
+  APP_UNSPECIFIED = 0;
+  APP_PHOTOS = 1;
+  APP_CINEMA = 2;
+  APP_ARCADE = 3;
+}
+
+// Role is a member's role inside one household. Super-Admin is a flag on the user, not a role.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_ADMIN = 1;
+  ROLE_MEMBER = 2;
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  string image_url = 4;
+  bool is_super_admin = 5;
+  bool banned = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// Allowance is what the Super-Admin grants a household.
+message Allowance {
+  uint64 storage_cap_bytes = 1;
+  repeated App enabled_apps = 2;
+  uint32 member_limit = 3;
+}
+
+// Usage is the household's current storage accounting. Reserved bytes belong to uploads
+// that are prepared but not finished. Remaining bytes never go below zero.
+message Usage {
+  uint64 used_bytes = 1;
+  uint64 reserved_bytes = 2;
+  uint64 remaining_bytes = 3;
+}
+
+message Household {
+  string id = 1;
+  string name = 2;
+  bool suspended = 3;
+  Allowance allowance = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message Membership {
+  Household household = 1;
+  Role role = 2;
+}
+
+message GetSetupStatusRequest {}
+
+message GetSetupStatusResponse {
+  bool needs_setup = 1;
+  // True when the server only accepts one preset admin email for setup.
+  bool admin_email_required = 2;
+}
+
+message CompleteSetupRequest {
+  string name = 1;
+  string email = 2;
+  string password = 3;
+  string household_name = 4;
+}
+
+message CompleteSetupResponse {
+  User user = 1;
+  Household household = 2;
+}
+
+message GetViewerRequest {}
+
+message GetViewerResponse {
+  User user = 1;
+  // Empty for an outside contributor who belongs to no household.
+  repeated Membership memberships = 2;
+  // Empty when the viewer has no household.
+  string active_household_id = 3;
+  // Usage of the active household. Unset when there is no active household.
+  Usage active_usage = 4;
+}
+
+message SetActiveHouseholdRequest {
+  string household_id = 1;
+}
+
+message SetActiveHouseholdResponse {
+  GetViewerResponse viewer = 1;
+}
+
+message HouseholdInvite {
+  string id = 1;
+  Allowance allowance = 2;
+  // Optional note so the Super-Admin remembers who the invite is for.
+  string note = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message CreateHouseholdInviteRequest {
+  Allowance allowance = 1;
+  string note = 2;
+}
+
+message CreateHouseholdInviteResponse {
+  HouseholdInvite invite = 1;
+  // The only time the invite link is returned. The server stores only its hash.
+  string invite_url = 2;
+}
+
+message ListHouseholdInvitesRequest {}
+
+message ListHouseholdInvitesResponse {
+  repeated HouseholdInvite invites = 1;
+}
+
+message RevokeHouseholdInviteRequest {
+  string invite_id = 1;
+}
+
+message RevokeHouseholdInviteResponse {}
+
+message HouseholdSummary {
+  Household household = 1;
+  Usage usage = 2;
+  uint32 member_count = 3;
+  uint32 pending_invite_count = 4;
+}
+
+message ListHouseholdsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListHouseholdsResponse {
+  repeated HouseholdSummary households = 1;
+  string next_page_token = 2;
+}
+
+message UpdateHouseholdAllowanceRequest {
+  string household_id = 1;
+  Allowance allowance = 2;
+  // Paths: storage_cap_bytes, enabled_apps, member_limit.
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message UpdateHouseholdAllowanceResponse {
+  Household household = 1;
+}
+
+message SetHouseholdSuspendedRequest {
+  string household_id = 1;
+  bool suspended = 2;
+}
+
+message SetHouseholdSuspendedResponse {
+  Household household = 1;
+}
+
+message ListUsersRequest {
+  // Matches name or email, case-insensitively. Empty lists everyone.
+  string query = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  string next_page_token = 2;
+}
+
+message BanUserRequest {
+  string user_id = 1;
+  string reason = 2;
+}
+
+message BanUserResponse {
+  User user = 1;
+}
+
+message UnbanUserRequest {
+  string user_id = 1;
+}
+
+message UnbanUserResponse {
+  User user = 1;
+}
+
+message RedeemHouseholdInviteRequest {
+  // The secret from the invite link.
+  string token = 1;
+  string household_name = 2;
+}
+
+message RedeemHouseholdInviteResponse {
+  Household household = 1;
+}
+
+message Member {
+  User user = 1;
+  Role role = 2;
+  google.protobuf.Timestamp joined_at = 3;
+}
+
+message MemberInvite {
+  string id = 1;
+  string email = 2;
+  Role role = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message ListMembersRequest {}
+
+message ListMembersResponse {
+  repeated Member members = 1;
+  repeated MemberInvite pending_invites = 2;
+  // Seats left under the member limit after members and pending invites. Never below zero.
+  uint32 seats_remaining = 3;
+}
+
+message InviteMemberRequest {
+  string email = 1;
+  Role role = 2;
+}
+
+message InviteMemberResponse {
+  MemberInvite invite = 1;
+  // A copyable link to the same invite, also sent by email.
+  string invite_url = 2;
+}
+
+message CancelMemberInviteRequest {
+  string invite_id = 1;
+}
+
+message CancelMemberInviteResponse {}
+
+message AcceptMemberInviteRequest {
+  string invite_id = 1;
+}
+
+message AcceptMemberInviteResponse {
+  Household household = 1;
+}
+
+message RemoveMemberRequest {
+  string user_id = 1;
+}
+
+message RemoveMemberResponse {}
+
+message UpdateMemberRoleRequest {
+  string user_id = 1;
+  Role role = 2;
+}
+
+message UpdateMemberRoleResponse {
+  Member member = 1;
+}
+
+// ResourceRef names one app-owned resource, such as a Photos album. The app defines kind and id.
+message ResourceRef {
+  App app = 1;
+  string kind = 2;
+  string id = 3;
+}
+
+message ContributorGrant {
+  string id = 1;
+  string household_id = 2;
+  ResourceRef resource = 3;
+  string grantee_email = 4;
+  // Empty until the grantee first signs in.
+  string grantee_user_id = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message CreateContributorGrantRequest {
+  ResourceRef resource = 1;
+  string grantee_email = 2;
+}
+
+message CreateContributorGrantResponse {
+  ContributorGrant grant = 1;
+}
+
+message ListContributorGrantsRequest {
+  // When true, lists grants issued to the caller instead of by the active household.
+  bool mine = 1;
+  // Optional filter to one resource.
+  ResourceRef resource = 2;
+}
+
+message ListContributorGrantsResponse {
+  repeated ContributorGrant grants = 1;
+}
+
+message RevokeContributorGrantRequest {
+  string grant_id = 1;
+}
+
+message RevokeContributorGrantResponse {}
+
+message StartPairingRequest {
+  // Shown to the approver, for example "Living Room".
+  string device_name = 1;
+}
+
+message StartPairingResponse {
+  string pairing_id = 1;
+  // Six characters to show on screen.
+  string code = 2;
+  // Kept only on the Apple TV and sent with each poll.
+  string device_secret = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  uint32 poll_interval_seconds = 5;
+}
+
+message ApprovePairingRequest {
+  string code = 1;
+  // The household the Apple TV opens into. The approver must belong to it.
+  string household_id = 2;
+}
+
+message ApprovePairingResponse {
+  string device_name = 1;
+}
+
+enum PairingStatus {
+  PAIRING_STATUS_UNSPECIFIED = 0;
+  PAIRING_STATUS_PENDING = 1;
+  PAIRING_STATUS_APPROVED = 2;
+  PAIRING_STATUS_EXPIRED = 3;
+}
+
+message PollPairingRequest {
+  string pairing_id = 1;
+  string device_secret = 2;
+}
+
+message PollPairingResponse {
+  PairingStatus status = 1;
+  // Set only on the one poll that returns APPROVED.
+  string session_token = 2;
+  string household_id = 3;
+}
+
+message PrepareUploadRequest {
+  App app = 1;
+  uint64 size_bytes = 2;
+  // Who pays. Unset means the active household.
+  oneof billing {
+    // A contributor grant issued to the caller. Billed to the granting household.
+    string grant_id = 3;
+    // The instance-wide Cinema or Arcade library. Super-Admin only, billed to no household.
+    bool shared_library = 4;
+  }
+}
+
+message PrepareUploadResponse {
+  string reservation_id = 1;
+  // Storage ticket for HasChunks, chunk uploads, and CommitObject on the Gateway.
+  string upload_ticket = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message CancelUploadRequest {
+  string reservation_id = 1;
+}
+
+message CancelUploadResponse {}
