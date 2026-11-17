@@ -13,7 +13,13 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
 2. Run review subagents on it (for example `/ponytail-audit`). Post one `[AGENT]` comment per finding on the doc, quoting the line it refers to and the proposed change.
 3. The user reviews the draft and the findings in one pass, leaving inline comments.
 4. Address the comments: `list_comments`, reply in-thread to every thread whose latest comment does not start with `[AGENT]`, and update the doc. Repeat until the user approves.
-5. For scoping docs, create the issues (`save_issue`) only after approval. Never create issues before that.
+5. For scoping docs, create the issues (`save_issue`) only after approval. Never create issues before that, except idea issues (below).
+
+**Ideas and future features:** record any feature that is not ready for scoping as an idea issue, so it is not forgotten. Linear is the only place ideas live, not `docs/`, TODO comments, or chat.
+- Create it in the matching project's Backlog with the `idea` label. Check `list_issues` first to avoid duplicates.
+- A title and one or two sentences are enough. Skip the issue template.
+- When a milestone finishes, review that project's idea issues with the user: promote, keep, or cancel each one.
+- To promote an idea, write a scoping doc for it. After approval, turn the idea issue into the real issue (drop the label, fill in the template) or close it as a duplicate of the new issues.
 
 **Comment prefix:** every comment or reply an agent posts in Linear starts with `[AGENT] `. User comments have no prefix.
 
