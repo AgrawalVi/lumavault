@@ -14,7 +14,7 @@ func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destinati
     }
 
     let writer = try FileHandle(forWritingTo: staging)
-    var whole = SHA256()
+    var fileHasher = SHA256()
     do {
         for (index, expected) in object.chunkHashes.enumerated() {
             try Task.checkCancellation()
@@ -22,7 +22,7 @@ func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destinati
             guard SHA256.hash(data: bytes).lowercaseHex == expected else {
                 throw hashMismatch("chunk \(index) of object \(object.id)")
             }
-            whole.update(data: bytes)
+            fileHasher.update(data: bytes)
             try writer.write(contentsOf: bytes)
         }
         try writer.close()
@@ -31,7 +31,7 @@ func downloadVerified(object: ObjectMetadata, dataPlane: DataPlane, to destinati
         throw error
     }
 
-    guard whole.finalize().lowercaseHex == object.sha256Digest else {
+    guard fileHasher.finalize().lowercaseHex == object.sha256Digest else {
         throw hashMismatch("object \(object.id)")
     }
     if FileManager.default.fileExists(atPath: destination.path) {
