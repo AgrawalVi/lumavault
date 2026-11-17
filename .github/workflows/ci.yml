@@ -14,8 +14,25 @@ concurrency:
 
 jobs:
   test:
-    name: Buf, Go & Web SDK
+    name: Buf, Go & JavaScript workspace
     runs-on: ubuntu-latest
+    services:
+      # API tests each run in their own throwaway schemas on this database.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lumavault
+          POSTGRES_PASSWORD: lumavault
+          POSTGRES_DB: lumavault
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumavault -d lumavault"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://lumavault:lumavault@localhost:5432/lumavault
     steps:
       - uses: actions/checkout@v4
 
@@ -27,27 +44,27 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Reads the pnpm version from packageManager in package.json.
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: pnpm
 
-      - name: Lint and generate Protobuf stubs
-        run: |
-          buf lint
-          buf generate
+      - name: Generate Protobuf stubs
+        run: make proto
 
-      - name: Go vet, test, and build
+      - name: Lint
+        run: make lint-go lint-js
+
+      - name: Test
+        run: make test-go test-js
+
+      - name: Build
         run: |
-          go vet ./...
-          go test -race ./...
           go build -o bin/lumavault ./cmd/lumavault
-
-      - name: Web SDK typecheck, test, and build
-        run: |
-          npm --prefix sdk/web install --no-package-lock
-          npm --prefix sdk/web run typecheck
-          npm --prefix sdk/web test
-          npm --prefix sdk/web run build
+          pnpm -r --if-present run build
 
   swift:
     name: Swift SDK
@@ -65,7 +82,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Generate Protobuf stubs
-        run: buf generate
+        run: make proto
 
       - name: Build and test Swift SDK
-        run: swift test
+        run: make test-swift
