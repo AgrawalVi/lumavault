@@ -115,4 +115,8 @@ Linear's GitHub integration handles issue status and PR links automatically when
 
 1. **Branch first.** Before editing repo files, get the issue's `gitBranchName` (`get_issue`; ask the user which `LUM-XX` if unclear) and run `git fetch origin && git checkout -B <gitBranchName> origin/main`. Work with no issue (tooling, docs, CI) uses `chore/<slug>`, `docs/<slug>`, or `ci/<slug>` instead. `.githooks/` rejects any other branch name and any commit or push to `main` (enable with `git config core.hooksPath .githooks`).
 2. **Verify.** Run `make lint` and `make test`.
-3. **Open a PR.** `git push -u origin HEAD`, then `gh pr create` with `LUM-XX` in the title. Leave it open for user review and CI. Never push to `main` or merge your own PR.
+3. **Commit.** Every commit message and PR title uses one of these forms. Add the Linear issue ID in parentheses when there is one.
+   - `feat(<feature>): <description> (<ticket>)` for new behavior, for example `feat(web-sdk): add chunk planning and hashing (LUM-21)`.
+   - `chore: <description> (<ticket>)` for tooling, CI, dependencies, and cleanup.
+   - `docs: <description> (<ticket>)` for documentation only.
+4. **Open a PR.** `git push -u origin HEAD`, then `gh pr create` with a title in the same format. Leave it open for user review and CI. Never push to `main` or merge your own PR.
