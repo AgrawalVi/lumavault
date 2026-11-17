@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { FieldMaskSchema } from "@bufbuild/protobuf/wkt";
 import { type Client, Code, ConnectError, createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
+import { authHeaders } from "./auth.js";
 import { gatewayChunkFetcher, verifiedStream } from "./download.js";
 import { ObjectMetadataSchema, type ObjectMetadata, StorageService } from "./gen/lumavault/v1/storage_pb.js";
 import type {
@@ -15,7 +16,7 @@ import type {
   UploadResult,
 } from "./types.js";
 import { upload } from "./upload.js";
-import { streamUrl } from "./urls.js";
+import { chunkUrl, streamUrl } from "./urls.js";
 
 // Maps update() keys to the proto field paths the gateway's FieldMask expects.
 const UPDATE_MASK_PATHS: Record<keyof UpdateFields, string> = {
@@ -27,10 +28,12 @@ const UPDATE_MASK_PATHS: Record<keyof UpdateFields, string> = {
 /** One client per gateway. Create it once and use it for every storage call. */
 export class LumaVaultClient {
   readonly #baseUrl: string;
+  readonly #serviceKey: string | undefined;
   readonly #rpc: Client<typeof StorageService>;
 
   constructor(options: LumaVaultClientOptions) {
     this.#baseUrl = options.baseUrl;
+    this.#serviceKey = options.serviceKey;
     this.#rpc = createClient(
       StorageService,
       createConnectTransport({ baseUrl: options.baseUrl, useBinaryFormat: true }),
@@ -39,22 +42,36 @@ export class LumaVaultClient {
 
   /** Chunks, hashes, sends only missing chunks, and commits. Empty inputs are rejected. */
   async upload(input: UploadInput, options: UploadOptions): Promise<UploadResult> {
-    const object = await upload(this.#rpc, this.#baseUrl, input, options);
+    const object = await upload(this.#rpc, this.#baseUrl, input, options, this.#headers(options.ticket));
     return { ...object, url: this.streamUrl(object.id) };
   }
 
   /** Streams the object's bytes, failing with data_loss if any chunk or the whole file mismatches. */
   download(id: string, options: DownloadOptions = {}): ReadableStream<Uint8Array> {
-    return verifiedStream(this.get(id, options), gatewayChunkFetcher(this.#baseUrl), options.signal);
+    const fetcher = gatewayChunkFetcher(this.#baseUrl, this.#headers(options.ticket));
+    return verifiedStream(this.get(id, options), fetcher, options.signal);
   }
 
   /** A URL for video players and other byte-range readers. Not hash-checked. */
-  streamUrl(id: string): string {
-    return streamUrl(this.#baseUrl, id);
+  streamUrl(id: string, ticket?: string): string {
+    return streamUrl(this.#baseUrl, id, ticket);
+  }
+
+  /** A URL for one chunk, for example to show it in an image element. */
+  chunkUrl(sha256: string, ticket?: string): string {
+    return chunkUrl(this.#baseUrl, sha256, ticket);
+  }
+
+  /** The object's thumbnail URL, or null when it has none. */
+  thumbnailUrl(object: Pick<ObjectMetadata, "thumbnailChunkHash">, ticket?: string): string | null {
+    return object.thumbnailChunkHash ? this.chunkUrl(object.thumbnailChunkHash, ticket) : null;
   }
 
   async get(id: string, options: DownloadOptions = {}): Promise<ObjectMetadata> {
-    const { object } = await this.#rpc.getObject({ objectId: id }, { signal: options.signal });
+    const { object } = await this.#rpc.getObject(
+      { objectId: id },
+      { signal: options.signal, headers: this.#headers(options.ticket) },
+    );
     if (!object) {
       throw new ConnectError(`gateway returned no object for ${id}`, Code.Internal);
     }
@@ -67,7 +84,7 @@ export class LumaVaultClient {
     const { object } = await this.#rpc.updateObjectMetadata({
       object: create(ObjectMetadataSchema, { id, ...fields }),
       updateMask: create(FieldMaskSchema, { paths: keys.map((k) => UPDATE_MASK_PATHS[k]) }),
-    });
+    }, { headers: this.#headers() });
     if (!object) {
       throw new ConnectError(`gateway returned no object for ${id}`, Code.Internal);
     }
@@ -75,7 +92,33 @@ export class LumaVaultClient {
   }
 
   async delete(id: string): Promise<void> {
-    await this.#rpc.deleteObject({ objectId: id });
+    await this.#rpc.deleteObject({ objectId: id }, { headers: this.#headers() });
+  }
+
+  /**
+   * Makes a new object with the same bytes, billed separately by whoever commits it. The
+   * gateway keeps one copy of each chunk, so this writes only a new manifest. Needs the service key.
+   */
+  async copy(id: string): Promise<ObjectMetadata> {
+    const source = await this.get(id);
+    const { object } = await this.#rpc.commitObject(
+      {
+        namespace: source.namespace,
+        filename: source.filename,
+        mimeType: source.mimeType,
+        sizeBytes: source.sizeBytes,
+        chunkSizeBytes: source.chunkSizeBytes,
+        sha256Digest: source.sha256Digest,
+        chunkHashes: source.chunkHashes,
+        thumbnailChunkHash: source.thumbnailChunkHash,
+        skipDedup: true,
+      },
+      { headers: this.#headers() },
+    );
+    if (!object) {
+      throw new ConnectError(`gateway returned no object for the copy of ${id}`, Code.Internal);
+    }
+    return object;
   }
 
   /** One page of objects in a namespace. */
@@ -84,9 +127,13 @@ export class LumaVaultClient {
       namespace: options.namespace,
       pageToken: options.cursor ?? "",
       pageSize: options.limit ?? 0,
-    });
+    }, { headers: this.#headers() });
     const hasMore = res.nextPageToken !== "";
     return { objects: res.objects, cursor: hasMore ? res.nextPageToken : undefined, hasMore };
+  }
+
+  #headers(ticket?: string): Record<string, string> {
+    return authHeaders({ ticket, serviceKey: this.#serviceKey });
   }
 
   /** Every object in a namespace, fetching pages as the loop asks for them. */

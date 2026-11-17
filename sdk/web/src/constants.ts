@@ -11,3 +11,10 @@ export const DEFAULT_UPLOAD_CONCURRENCY = 4;
 // Gateway data plane routes, relative to the gateway base URL.
 export const CHUNKS_PATH = "v1/chunks/";
 export const STREAM_PATH = "v1/stream/";
+
+// Storage ticket credentials. Tickets go in Authorization as a Bearer token, or in the
+// token query parameter on URLs handed to video and image elements. The service key is for
+// apps/api only and must never reach a browser.
+export const AUTHORIZATION_HEADER = "Authorization";
+export const SERVICE_KEY_HEADER = "X-LumaVault-Service-Key";
+export const TOKEN_QUERY_PARAM = "token";

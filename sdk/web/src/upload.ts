@@ -17,6 +17,7 @@ export async function upload(
   baseUrl: string,
   input: UploadInput,
   options: UploadOptions,
+  headers: Record<string, string>,
 ): Promise<ObjectMetadata> {
   const filename = options.filename ?? (typeof File !== "undefined" && input instanceof File ? input.name : undefined);
   if (!filename) {
@@ -29,7 +30,7 @@ export async function upload(
   const plan = await planChunks(input, (loaded, total) => report("hashing", loaded, total));
   signal?.throwIfAborted();
 
-  const { missingChunkHashes } = await rpc.hasChunks({ chunkHashes: plan.chunkHashes }, { signal });
+  const { missingChunkHashes } = await rpc.hasChunks({ chunkHashes: plan.chunkHashes }, { signal, headers });
   const missing = new Set(missingChunkHashes);
   const toSend = uniqueChunkIndexes(plan).filter((i) => missing.has(plan.chunkHashes[i] as string));
 
@@ -37,7 +38,7 @@ export async function upload(
   let loaded = plan.sizeBytes - toSend.reduce((sum, i) => sum + chunkLength(plan, i), 0);
   report("uploading", loaded, plan.sizeBytes);
   await forEachConcurrent(toSend, options.concurrency ?? DEFAULT_UPLOAD_CONCURRENCY, async (i) => {
-    await putChunk(baseUrl, plan.chunkHashes[i] as string, chunkBody(input, plan, i), signal);
+    await putChunk(baseUrl, plan.chunkHashes[i] as string, chunkBody(input, plan, i), headers, signal);
     loaded += chunkLength(plan, i);
     report("uploading", loaded, plan.sizeBytes);
   });
@@ -53,7 +54,7 @@ export async function upload(
       chunkHashes: plan.chunkHashes,
       skipDedup: true,
     }),
-    { signal },
+    { signal, headers },
   );
   if (!res.object) {
     throw new ConnectError("gateway returned no object for CommitObject", Code.Internal);

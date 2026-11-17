@@ -6,6 +6,11 @@ export type { UploadInput };
 export interface LumaVaultClientOptions {
   /** Storage Gateway base URL, for example http://localhost:8080. */
   baseUrl: string;
+  /**
+   * The gateway's internal service key, sent on every call. Server-side code in apps/api
+   * only; never set this in a browser or app.
+   */
+  serviceKey?: string;
 }
 
 export interface UploadProgress {
@@ -27,6 +32,8 @@ export interface UploadOptions {
   concurrency?: number;
   onProgress?: (progress: UploadProgress) => void;
   signal?: AbortSignal;
+  /** Upload ticket from IamService.PrepareUpload. */
+  ticket?: string;
 }
 
 /** The committed object plus a URL that streams it. */
@@ -34,6 +41,8 @@ export type UploadResult = ObjectMetadata & { url: string };
 
 export interface DownloadOptions {
   signal?: AbortSignal;
+  /** Read ticket for this object, from the app's API. */
+  ticket?: string;
 }
 
 export interface UpdateFields {
