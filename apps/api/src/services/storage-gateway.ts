@@ -20,6 +20,11 @@ export interface StorageGateway {
   delete(objectId: string): Promise<void>;
   /** Points an object at a thumbnail chunk that is already uploaded. */
   setThumbnail(objectId: string, chunkSha256: string): Promise<void>;
+  /**
+   * Makes a new object with the same bytes, for a household that copies a shared item. The
+   * chunk store keeps one copy of each chunk, so this writes only a new manifest.
+   */
+  copy(objectId: string): Promise<StoredObject>;
 }
 
 export function createStorageGateway(options: { baseUrl: string; serviceKey: string }): StorageGateway {
@@ -46,6 +51,9 @@ export function createStorageGateway(options: { baseUrl: string; serviceKey: str
     },
     async setThumbnail(objectId, chunkSha256) {
       await client.update(objectId, { thumbnailChunkHash: chunkSha256 });
+    },
+    async copy(objectId) {
+      return toStored(await client.copy(objectId));
     },
   };
 }
