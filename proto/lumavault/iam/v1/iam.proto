@@ -9,6 +9,11 @@ import "google/protobuf/timestamp.proto";
 // and upload tickets. It is served by apps/api, which calls Better Auth server-side, so
 // clients never call Better Auth's household endpoints directly. Every byte count is
 // 64-bit. Read-only calls are marked side-effect-free so browsers can send them as GET.
+//
+// A user belongs to at most one household. Moving to another household moves the user's
+// private data with them and can copy shared items they choose. A user removed from a
+// household keeps read-only access to their private data for a grace period, then it is
+// deleted. Each app decides what is private and what is shared; IAM only moves it.
 service IamService {
   // Setup and viewer context.
 
@@ -17,21 +22,20 @@ service IamService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  // Creates the first account, makes it Super-Admin, creates its household, and signs it in.
-  // Runs only while no Super-Admin exists.
+  // Creates the first account, makes it Super-Admin and the Owner of a new household, and
+  // signs it in. Runs only while no Super-Admin exists.
   rpc CompleteSetup(CompleteSetupRequest) returns (CompleteSetupResponse);
 
-  // Returns who is signed in, their households, and the active household's allowance and usage.
+  // Returns who is signed in, their household and role, its allowance and usage, and their
+  // grace period if they were removed from a household.
   rpc GetViewer(GetViewerRequest) returns (GetViewerResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  // Switches the active household on the server session, which all web apps share.
-  rpc SetActiveHousehold(SetActiveHouseholdRequest) returns (SetActiveHouseholdResponse);
-
   // Super-Admin controls.
 
-  // Creates a single-use household creation invite with a preset allowance.
+  // Creates a single-use household creation invite for one email address with a preset
+  // allowance, and emails the link.
   rpc CreateHouseholdInvite(CreateHouseholdInviteRequest) returns (CreateHouseholdInviteResponse);
 
   // Lists household creation invites that are not yet redeemed, revoked, or expired.
@@ -41,7 +45,7 @@ service IamService {
 
   rpc RevokeHouseholdInvite(RevokeHouseholdInviteRequest) returns (RevokeHouseholdInviteResponse);
 
-  // Lists every household with its allowance, usage, and member count.
+  // Lists every household with its owner, allowance, usage, and member count.
   rpc ListHouseholds(ListHouseholdsRequest) returns (ListHouseholdsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -59,46 +63,60 @@ service IamService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  // Bans a user, revoking their sessions and pending invites at once.
+  // Bans a user permanently, revoking their sessions and pending invites at once.
   rpc BanUser(BanUserRequest) returns (BanUserResponse);
 
   rpc UnbanUser(UnbanUserRequest) returns (UnbanUserResponse);
 
-  // Households, members, and contributor grants.
+  // Invites and joining a household.
 
-  // Creates a household from a household creation invite. The caller becomes its Admin.
-  rpc RedeemHouseholdInvite(RedeemHouseholdInviteRequest) returns (RedeemHouseholdInviteResponse);
+  // Describes an invite before it is used: who sent it, which household, and, when the
+  // caller already belongs to a household, what moving would involve. Works signed out
+  // too, so the invite page can show who the invite is from before sign-up.
+  rpc GetInvite(GetInviteRequest) returns (GetInviteResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
-  // Lists the active household's members, pending member invites, and free seats.
+  // Lists the shared items in the caller's current household that they may copy when they
+  // move. Every app contributes its own items; private data always moves and is not listed.
+  rpc ListCopyableItems(ListCopyableItemsRequest) returns (ListCopyableItemsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Uses an invite. A new person invited as a member joins automatically when they sign up,
+  // so this is for household creation invites and for people who already have an account.
+  // A caller in another household moves: their private data goes with them, the chosen
+  // shared items are copied, and an Owner leaving others behind names the next Owner.
+  rpc JoinHousehold(JoinHouseholdRequest) returns (JoinHouseholdResponse);
+
+  // Household members. These act on the caller's own household.
+
+  // Lists the household's members, pending member invites, and free seats.
   rpc ListMembers(ListMembersRequest) returns (ListMembersResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  // Invites someone by email to the active household. Pending invites count toward the
-  // member limit. Admin only.
+  // Invites someone by email as an Admin or Member, and emails the link. Pending invites
+  // count toward the member limit. Admin or Owner only.
   rpc InviteMember(InviteMemberRequest) returns (InviteMemberResponse);
 
   rpc CancelMemberInvite(CancelMemberInviteRequest) returns (CancelMemberInviteResponse);
 
-  // Joins the household of a member invite addressed to the caller's email.
-  rpc AcceptMemberInvite(AcceptMemberInviteRequest) returns (AcceptMemberInviteResponse);
-
-  // Removes a member. The last Admin cannot be removed. Admin only.
+  // Removes a member, who keeps read-only access to their private data for the grace
+  // period. The Owner cannot be removed. Admin or Owner only.
   rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
 
-  // Changes a member's role. The last Admin cannot be demoted. Admin only.
+  // Makes a member an Admin or a Member. The Owner's role changes only through
+  // TransferOwnership. Admin or Owner only.
   rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (UpdateMemberRoleResponse);
 
-  // Lets someone outside the household add to one shared resource, such as a Photos album.
-  // Their uploads are billed to the granting household.
-  rpc CreateContributorGrant(CreateContributorGrantRequest) returns (CreateContributorGrantResponse);
+  // Hands the Owner role to another member, who must already belong to the household. The
+  // previous Owner becomes an Admin. Owner only.
+  rpc TransferOwnership(TransferOwnershipRequest) returns (TransferOwnershipResponse);
 
-  // Lists grants the active household has issued, or with mine set, grants issued to the caller.
-  rpc ListContributorGrants(ListContributorGrantsRequest) returns (ListContributorGrantsResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-
-  rpc RevokeContributorGrant(RevokeContributorGrantRequest) returns (RevokeContributorGrantResponse);
+  // Leaves the household without joining another, starting the grace period. An Owner
+  // leaving others behind names the next Owner; a sole member closes the household.
+  rpc LeaveHousehold(LeaveHouseholdRequest) returns (LeaveHouseholdResponse);
 
   // Apple TV pairing.
 
@@ -107,6 +125,7 @@ service IamService {
   rpc StartPairing(StartPairingRequest) returns (StartPairingResponse);
 
   // Called by a signed-in user on their phone to approve the code shown on the Apple TV.
+  // The Apple TV opens in the approver's household.
   rpc ApprovePairing(ApprovePairingRequest) returns (ApprovePairingResponse);
 
   // Polled by the Apple TV. Returns the bearer session token exactly once after approval.
@@ -114,8 +133,8 @@ service IamService {
 
   // Uploads.
 
-  // Reserves bytes against the target's quota and returns a signed upload ticket for the
-  // Storage Gateway. The app's own finish call claims the object and refunds the rest.
+  // Reserves bytes against the caller's household quota and returns a signed upload ticket
+  // for the Storage Gateway. The app's own finish call claims the object and refunds the rest.
   rpc PrepareUpload(PrepareUploadRequest) returns (PrepareUploadResponse);
 
   // Releases a reservation that will not be finished.
@@ -130,11 +149,13 @@ enum App {
   APP_ARCADE = 3;
 }
 
-// Role is a member's role inside one household. Super-Admin is a flag on the user, not a role.
+// Role is a member's role in their household. Each household has exactly one Owner, who has
+// every Admin power and cannot be removed. Super-Admin is a flag on the user, not a role.
 enum Role {
   ROLE_UNSPECIFIED = 0;
-  ROLE_ADMIN = 1;
-  ROLE_MEMBER = 2;
+  ROLE_OWNER = 1;
+  ROLE_ADMIN = 2;
+  ROLE_MEMBER = 3;
 }
 
 message User {
@@ -144,7 +165,9 @@ message User {
   string image_url = 4;
   bool is_super_admin = 5;
   bool banned = 6;
-  google.protobuf.Timestamp created_at = 7;
+  // Why the Super-Admin banned the user. Empty when not banned.
+  string ban_reason = 7;
+  google.protobuf.Timestamp created_at = 8;
 }
 
 // Allowance is what the Super-Admin grants a household.
@@ -155,11 +178,13 @@ message Allowance {
 }
 
 // Usage is the household's current storage accounting. Reserved bytes belong to uploads
-// that are prepared but not finished. Remaining bytes never go below zero.
+// that are prepared but not finished. Held bytes belong to removed members in their grace
+// period and still count against the cap. Remaining bytes never go below zero.
 message Usage {
   uint64 used_bytes = 1;
   uint64 reserved_bytes = 2;
   uint64 remaining_bytes = 3;
+  uint64 held_bytes = 4;
 }
 
 message Household {
@@ -167,12 +192,16 @@ message Household {
   string name = 2;
   bool suspended = 3;
   Allowance allowance = 4;
-  google.protobuf.Timestamp created_at = 5;
+  string owner_user_id = 5;
+  google.protobuf.Timestamp created_at = 6;
 }
 
-message Membership {
-  Household household = 1;
-  Role role = 2;
+// GracePeriod describes a user removed from a household. Until delete_at they can sign in
+// and read or download their private data; joining a household moves it there.
+message GracePeriod {
+  string former_household_name = 1;
+  uint64 private_bytes = 2;
+  google.protobuf.Timestamp delete_at = 3;
 }
 
 message GetSetupStatusRequest {}
@@ -199,34 +228,30 @@ message GetViewerRequest {}
 
 message GetViewerResponse {
   User user = 1;
-  // Empty for an outside contributor who belongs to no household.
-  repeated Membership memberships = 2;
-  // Empty when the viewer has no household.
-  string active_household_id = 3;
-  // Usage of the active household. Unset when there is no active household.
-  Usage active_usage = 4;
-}
-
-message SetActiveHouseholdRequest {
-  string household_id = 1;
-}
-
-message SetActiveHouseholdResponse {
-  GetViewerResponse viewer = 1;
+  // Unset when the viewer belongs to no household.
+  Household household = 2;
+  Role role = 3;
+  // Usage of the viewer's household. Unset when there is no household.
+  Usage usage = 4;
+  // Set while the viewer is in a grace period after leaving or being removed.
+  GracePeriod grace_period = 5;
 }
 
 message HouseholdInvite {
   string id = 1;
-  Allowance allowance = 2;
+  // The only address that can use the invite.
+  string email = 2;
+  Allowance allowance = 3;
   // Optional note so the Super-Admin remembers who the invite is for.
-  string note = 3;
-  google.protobuf.Timestamp expires_at = 4;
-  google.protobuf.Timestamp created_at = 5;
+  string note = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  google.protobuf.Timestamp created_at = 6;
 }
 
 message CreateHouseholdInviteRequest {
-  Allowance allowance = 1;
-  string note = 2;
+  string email = 1;
+  Allowance allowance = 2;
+  string note = 3;
 }
 
 message CreateHouseholdInviteResponse {
@@ -249,9 +274,10 @@ message RevokeHouseholdInviteResponse {}
 
 message HouseholdSummary {
   Household household = 1;
-  Usage usage = 2;
-  uint32 member_count = 3;
-  uint32 pending_invite_count = 4;
+  User owner = 2;
+  Usage usage = 3;
+  uint32 member_count = 4;
+  uint32 pending_invite_count = 5;
 }
 
 message ListHouseholdsRequest {
@@ -313,13 +339,94 @@ message UnbanUserResponse {
   User user = 1;
 }
 
-message RedeemHouseholdInviteRequest {
-  // The secret from the invite link.
-  string token = 1;
-  string household_name = 2;
+// InviteRef names an invite by what its link carries.
+message InviteRef {
+  oneof invite {
+    // The secret from a household creation invite link.
+    string household_invite_token = 1;
+    // The ID from a member invite link.
+    string member_invite_id = 2;
+  }
 }
 
-message RedeemHouseholdInviteResponse {
+enum InviteKind {
+  INVITE_KIND_UNSPECIFIED = 0;
+  // From the Super-Admin: the invitee creates a new household and becomes its Owner.
+  INVITE_KIND_NEW_HOUSEHOLD = 1;
+  // From a household Admin or Owner: the invitee joins that household.
+  INVITE_KIND_MEMBER = 2;
+}
+
+// Move describes what using an invite means for a caller who already belongs to a household.
+message Move {
+  Household current_household = 1;
+  // Private data that always moves with the caller.
+  uint64 private_bytes = 2;
+  // True when the caller is the Owner and others remain, so they must name the next Owner.
+  bool must_choose_next_owner = 3;
+  // Members who could become the next Owner.
+  repeated Member next_owner_candidates = 4;
+  // True when the caller is the only member, so their current household closes.
+  bool closes_current_household = 5;
+}
+
+message GetInviteRequest {
+  InviteRef invite = 1;
+}
+
+message GetInviteResponse {
+  InviteKind kind = 1;
+  string email = 2;
+  string inviter_name = 3;
+  // The household to join. Empty for a new household invite.
+  string household_name = 4;
+  // The role to join with. Owner for a new household invite.
+  Role role = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  // Set when the caller is signed in and already belongs to a household.
+  Move move = 7;
+}
+
+// ItemRef names one app-owned shared item, such as a Photos album or a Cinema movie. The
+// app defines kind and id.
+message ItemRef {
+  App app = 1;
+  string kind = 2;
+  string id = 3;
+}
+
+message CopyableItem {
+  ItemRef ref = 1;
+  string name = 2;
+  uint64 size_bytes = 3;
+  // True when the caller uploaded it. Items others uploaded can be copied too.
+  bool uploaded_by_caller = 4;
+}
+
+message ListCopyableItemsRequest {
+  // Optional filter to one app.
+  App app = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListCopyableItemsResponse {
+  repeated CopyableItem items = 1;
+  string next_page_token = 2;
+}
+
+message JoinHouseholdRequest {
+  InviteRef invite = 1;
+  // Required for a new household invite: the new household's name.
+  string household_name = 2;
+  // Shared items to copy from the current household. The current household keeps its own
+  // copy, and the copies count against the new household's quota.
+  repeated ItemRef copy_items = 3;
+  // Required when the caller owns their current household and others remain.
+  string next_owner_user_id = 4;
+}
+
+message JoinHouseholdResponse {
   Household household = 1;
 }
 
@@ -347,6 +454,7 @@ message ListMembersResponse {
 
 message InviteMemberRequest {
   string email = 1;
+  // ROLE_ADMIN or ROLE_MEMBER.
   Role role = 2;
 }
 
@@ -362,14 +470,6 @@ message CancelMemberInviteRequest {
 
 message CancelMemberInviteResponse {}
 
-message AcceptMemberInviteRequest {
-  string invite_id = 1;
-}
-
-message AcceptMemberInviteResponse {
-  Household household = 1;
-}
-
 message RemoveMemberRequest {
   string user_id = 1;
 }
@@ -378,6 +478,7 @@ message RemoveMemberResponse {}
 
 message UpdateMemberRoleRequest {
   string user_id = 1;
+  // ROLE_ADMIN or ROLE_MEMBER.
   Role role = 2;
 }
 
@@ -385,48 +486,18 @@ message UpdateMemberRoleResponse {
   Member member = 1;
 }
 
-// ResourceRef names one app-owned resource, such as a Photos album. The app defines kind and id.
-message ResourceRef {
-  App app = 1;
-  string kind = 2;
-  string id = 3;
+message TransferOwnershipRequest {
+  string user_id = 1;
 }
 
-message ContributorGrant {
-  string id = 1;
-  string household_id = 2;
-  ResourceRef resource = 3;
-  string grantee_email = 4;
-  // Empty until the grantee first signs in.
-  string grantee_user_id = 5;
-  google.protobuf.Timestamp created_at = 6;
+message TransferOwnershipResponse {}
+
+message LeaveHouseholdRequest {
+  // Required when the caller is the Owner and others remain.
+  string next_owner_user_id = 1;
 }
 
-message CreateContributorGrantRequest {
-  ResourceRef resource = 1;
-  string grantee_email = 2;
-}
-
-message CreateContributorGrantResponse {
-  ContributorGrant grant = 1;
-}
-
-message ListContributorGrantsRequest {
-  // When true, lists grants issued to the caller instead of by the active household.
-  bool mine = 1;
-  // Optional filter to one resource.
-  ResourceRef resource = 2;
-}
-
-message ListContributorGrantsResponse {
-  repeated ContributorGrant grants = 1;
-}
-
-message RevokeContributorGrantRequest {
-  string grant_id = 1;
-}
-
-message RevokeContributorGrantResponse {}
+message LeaveHouseholdResponse {}
 
 message StartPairingRequest {
   // Shown to the approver, for example "Living Room".
@@ -445,8 +516,6 @@ message StartPairingResponse {
 
 message ApprovePairingRequest {
   string code = 1;
-  // The household the Apple TV opens into. The approver must belong to it.
-  string household_id = 2;
 }
 
 message ApprovePairingResponse {
@@ -469,19 +538,14 @@ message PollPairingResponse {
   PairingStatus status = 1;
   // Set only on the one poll that returns APPROVED.
   string session_token = 2;
-  string household_id = 3;
 }
 
 message PrepareUploadRequest {
   App app = 1;
   uint64 size_bytes = 2;
-  // Who pays. Unset means the active household.
-  oneof billing {
-    // A contributor grant issued to the caller. Billed to the granting household.
-    string grant_id = 3;
-    // The instance-wide Cinema or Arcade library. Super-Admin only, billed to no household.
-    bool shared_library = 4;
-  }
+  // Upload to the instance-wide Cinema or Arcade library instead of the caller's household.
+  // Super-Admin only, and billed to no household.
+  bool shared_library = 3;
 }
 
 message PrepareUploadResponse {
