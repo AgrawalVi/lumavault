@@ -7,6 +7,7 @@ import { DB_SCHEMAS } from "./constants.js";
 import { loadSchemaModules } from "./index.js";
 import { organization, user } from "./schemas/auth.js";
 import { iamObjectClaims } from "./schemas/iam/claims.js";
+import { iamGracePeriods } from "./schemas/iam/grace.js";
 import { iamHouseholds } from "./schemas/iam/households.js";
 import { iamInstanceSettings } from "./schemas/iam/instance.js";
 import { iamHouseholdInvites } from "./schemas/iam/invites.js";
@@ -94,7 +95,7 @@ describe("object claims", () => {
 
 describe("secrets", () => {
   it("stores invite tokens only as SHA-256", async () => {
-    const base = { storageCapBytes: 0n, createdBy: userId, expiresAt: inAnHour() };
+    const base = { email: "new@example.com", storageCapBytes: 0n, createdBy: userId, expiresAt: inAnHour() };
     await database.db.insert(iamHouseholdInvites).values({ ...base, tokenHash: sha256("secret") });
     await expectConstraint(
       database.db.insert(iamHouseholdInvites).values({ ...base, tokenHash: "plain-secret-token" }),
@@ -127,6 +128,17 @@ describe("secrets", () => {
       database.db.insert(iamPairingRequests).values({ ...base, code: "DUP234", deviceSecretHash: sha256("b") }),
       "pairing_requests_pending_code_unique",
     );
+  });
+});
+
+describe("grace periods", () => {
+  it("allow one per user and never negative held bytes", async () => {
+    const householdId = await newHousehold();
+    const row = { userId, householdId, householdName: "Home", heldBytes: 10n, deleteAt: inAnHour() };
+    await database.db.insert(iamGracePeriods).values(row);
+    await expectConstraint(database.db.insert(iamGracePeriods).values(row), "grace_periods_pkey");
+    await database.db.delete(iamGracePeriods);
+    await expectConstraint(database.db.insert(iamGracePeriods).values({ ...row, heldBytes: -1n }), "grace_periods_held_bytes_nonnegative");
   });
 });
 
