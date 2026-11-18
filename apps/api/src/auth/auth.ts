@@ -6,7 +6,7 @@ import type { Db } from "#/db/index.js";
 import {
   AUTH_BASE_PATH,
   DEFAULT_USER_ROLE,
-  HOUSEHOLD_ADMIN_ROLE,
+  HOUSEHOLD_OWNER_ROLE,
   PASSKEY_RP_NAME,
   SUPER_ADMIN_ROLE,
 } from "./constants.js";
@@ -47,7 +47,7 @@ export function createAuth(deps: AuthDeps) {
       magicLink({ sendMagicLink: (message) => deps.sendMagicLink(message) }),
       bearer(),
       admin({ adminRoles: [SUPER_ADMIN_ROLE], defaultRole: DEFAULT_USER_ROLE }),
-      organization({ ac: householdAccess, roles: householdRoles, creatorRole: HOUSEHOLD_ADMIN_ROLE }),
+      organization({ ac: householdAccess, roles: householdRoles, creatorRole: HOUSEHOLD_OWNER_ROLE }),
     ],
   });
 }

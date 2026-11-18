@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as authTables from "#/db/schemas/auth.js";
 import { createTestDatabase, pushAllSchemas, type TestDatabase } from "#/db/testing.js";
 import { createAuth } from "./auth.js";
-import { HOUSEHOLD_ADMIN_ROLE } from "./constants.js";
+import { HOUSEHOLD_OWNER_ROLE } from "./constants.js";
 import { toAuthSchema } from "./generate-schema.js";
 
 const API_DIR = fileURLToPath(new URL("../../", import.meta.url));
@@ -49,7 +49,7 @@ describe("generated auth schema", () => {
 });
 
 describe("createAuth", () => {
-  it("signs up a user and makes a household creator its admin", async () => {
+  it("signs up a user and makes a household creator its owner", async () => {
     const auth = createAuth({
       db: database.db,
       tables: authTables,
@@ -73,6 +73,6 @@ describe("createAuth", () => {
       .select()
       .from(authTables.member)
       .where(eq(authTables.member.organizationId, household!.id));
-    expect(members).toEqual([expect.objectContaining({ userId: signUp.user.id, role: HOUSEHOLD_ADMIN_ROLE })]);
+    expect(members).toEqual([expect.objectContaining({ userId: signUp.user.id, role: HOUSEHOLD_OWNER_ROLE })]);
   });
 });
