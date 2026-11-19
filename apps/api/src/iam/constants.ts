@@ -10,6 +10,3 @@ export const SECRET_HASH_PATTERN = "^[0-9a-f]{64}$";
 
 // The instance settings table holds exactly one row with this ID.
 export const INSTANCE_SETTINGS_ID = 1;
-
-// How long a removed member can still read their private data before it is deleted.
-export const GRACE_PERIOD_DAYS = 30;

@@ -6,12 +6,7 @@ import { DEFAULT_MEMBER_LIMIT } from "#/iam/constants.js";
 import { DB_SCHEMAS } from "./constants.js";
 import { loadSchemaModules } from "./index.js";
 import { organization, user } from "./schemas/auth.js";
-import { iamObjectClaims } from "./schemas/iam/claims.js";
-import { iamGracePeriods } from "./schemas/iam/grace.js";
-import { iamHouseholds } from "./schemas/iam/households.js";
-import { iamInstanceSettings } from "./schemas/iam/instance.js";
-import { iamHouseholdInvites } from "./schemas/iam/invites.js";
-import { iamPairingRequests } from "./schemas/iam/pairing.js";
+import { iamGracePeriods, iamHouseholdInvites, iamHouseholds, iamInstanceSettings, iamObjectClaims, iamPairingRequests } from "./schemas/iam.js";
 import { createTestDatabase, pushAllSchemas, type TestDatabase } from "./testing.js";
 
 let database: TestDatabase;
