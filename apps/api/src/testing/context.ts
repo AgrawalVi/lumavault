@@ -1,6 +1,7 @@
 // Test helpers for code that needs a real ModuleContext. Never imported by the server.
 import { type ContextValues, createContextValues } from "@connectrpc/connect";
 import { createAuth } from "#/auth/auth.js";
+import { allowSignUp } from "#/auth/sign-up-gate.js";
 import { loadConfig } from "#/config.js";
 import * as authTables from "#/db/schemas/auth.js";
 import type { TestDatabase } from "#/db/testing.js";
@@ -66,9 +67,9 @@ export interface TestUser {
   headers: Headers;
 }
 
-/** Signs up a user and returns bearer headers for their session. */
+/** Signs up a user past the invite gate and returns bearer headers for their session. */
 export async function signUp(ctx: ModuleContext, email: string): Promise<TestUser> {
-  const res = await ctx.auth.api.signUpEmail({ body: { name: email.split("@")[0] ?? email, email, password: "correct horse battery" } });
+  const res = await allowSignUp(() => ctx.auth.api.signUpEmail({ body: { name: email.split("@")[0] ?? email, email, password: "correct horse battery" } }));
   if (!res.token) {
     throw new Error(`sign-up for ${email} returned no session token`);
   }

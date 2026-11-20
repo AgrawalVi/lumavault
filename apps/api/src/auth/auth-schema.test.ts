@@ -7,6 +7,7 @@ import * as authTables from "#/db/schemas/auth.js";
 import { createTestDatabase, pushAllSchemas, type TestDatabase } from "#/db/testing.js";
 import { createAuth } from "./auth.js";
 import { HOUSEHOLD_OWNER_ROLE } from "./constants.js";
+import { allowSignUp } from "./sign-up-gate.js";
 import { toAuthSchema } from "#/tools/generate-auth-schema.js";
 
 const API_DIR = fileURLToPath(new URL("../../", import.meta.url));
@@ -60,9 +61,9 @@ describe("createAuth", () => {
       sendMagicLink: async () => {},
     });
 
-    const signUp = await auth.api.signUpEmail({
-      body: { name: "Ada", email: "ada@example.com", password: "correct horse battery" },
-    });
+    const signUp = await allowSignUp(() =>
+      auth.api.signUpEmail({ body: { name: "Ada", email: "ada@example.com", password: "correct horse battery" } }),
+    );
     expect(signUp.token).toBeTruthy();
 
     const headers = new Headers({ authorization: `Bearer ${signUp.token}` });
