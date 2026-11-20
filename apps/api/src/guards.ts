@@ -1,6 +1,7 @@
 import { Code, type ContextValues, ConnectError } from "@connectrpc/connect";
-import { HOUSEHOLD_OWNER_ROLE } from "./auth/constants.js";
-import { type HouseholdMembership, requestContext, type Viewer } from "./context.js";
+import { HOUSEHOLD_MEMBER_ROLE, HOUSEHOLD_OWNER_ROLE } from "./auth/constants.js";
+import { requestContext, type Viewer } from "./context.js";
+import type { HouseholdMembership } from "./data/iam/household/types.js";
 import type { ModuleContext } from "./modules.js";
 
 /** The part of a Connect handler context the guards read. */
@@ -47,7 +48,7 @@ export async function requireHouseholdMember(input: GuardInput, ctx: ModuleConte
 /** The household's Owner or an Admin. */
 export async function requireHouseholdAdmin(input: GuardInput, ctx: ModuleContext): Promise<HouseholdCaller> {
   const caller = await requireHouseholdMember(input, ctx);
-  if (caller.household.role === "member") {
+  if (caller.household.role === HOUSEHOLD_MEMBER_ROLE) {
     throw new ConnectError("household Admin only", Code.PermissionDenied);
   }
   return caller;
