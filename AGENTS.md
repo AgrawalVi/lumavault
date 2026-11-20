@@ -50,15 +50,18 @@ Each agent conversation works in its own git worktree, mapped to one Linear issu
 ## 3. Code Conventions (All Languages)
 
 1. **No Markdown syntax in code comments, ever.** No backticks, `**bold**`, `_italics_`, `#` headings, `[links](...)`, or bullet lists inside `//`, `/** */`, `///`, or `#` comments (Go, TypeScript, Swift, Protobuf, shell). Write identifiers and paths as plain text: `Uploads via PUT /v1/chunks/{sha256} and returns the stored size.` not ``Uploads via `PUT /v1/chunks/{sha256}`...``. Markdown belongs only in `.md` files.
-2. **Organization over file count.** Never be afraid of extra files when they buy clearer separation. Each file owns one concern:
-   - Public contracts and types (interfaces, option/result types) live apart from implementations (mirror `pkg/chunkstore/store.go` vs `local.go`, `pkg/metadata/store.go` vs `engine.go` vs `local.go`).
-   - Constants live in a dedicated constants file or package, never inline in core logic.
-   - Validation, URL building, HTTP/body helpers, concurrency primitives, and other utilities live in their own focused modules, not inside the client or service they support.
+2. **Keep files focused, without over-splitting.** Prefer a few cohesive files over many tiny ones. Split a file when it mixes unrelated concerns or grows past roughly 300 lines of non-test code.
+   - Public contracts and types live apart from implementations when a package has more than one implementation (mirror `pkg/chunkstore/store.go` vs `local.go`, `pkg/metadata/store.go` vs `engine.go` vs `local.go`).
+   - Constants live in a constants file or package, never inline in core logic.
+   - Validation, URL building, HTTP/body helpers, and other utilities get their own module once they are shared or large. A small helper with one caller can stay beside it.
    - One canonical implementation per helper (one hash validator, one object ID validator, one fetch resolver). Do not duplicate helpers across files with drifting rules.
    - One public entrypoint per package (`index.ts`, the Go package itself). Internal modules do not re-export each other's symbols.
    - In `apps/api`, import across folders with the `#/` alias (for example `#/auth/role-checks.js`), never `../`. Keep `./` for files in the same folder. The `.js` ending is required: Node runs the compiled files, so the specifier names the output file. Compiled output must run through `pnpm start`, which passes `--conditions=@lumavault/dist` so the alias points at `dist/`.
-   - Split any file that mixes orchestration with helpers or grows past roughly 300 lines of non-test code.
-3. **The user makes design decisions, not the agent.** Whenever work reaches a fork (API shape, error model, wire contract, file/module layout, dependency choice, default values, naming of public symbols, behavior the spec does not pin down), stop and ask a clarifying question with the concrete options and their trade-offs before writing code. Do not pick a default silently and move on, and do not invent wire contracts (HTTP response bodies, headers, error strings) that the Gateway or `proto/` does not already define.
+3. **Database queries live in `apps/api/src/data/`.** Routers, guards, and workers never write Drizzle queries inline.
+   - Layout: `data/<schema>/<table>/<verb>-<thing>.ts`, where schema is one of `auth`, `iam`, `photos`, `cinema`, `arcade`. A file holds the related functions for one operation on that table, for example `getHouseholdByUserId` and `getHouseholdById` in `data/iam/household/get-household.ts`. Verbs are `create`, `get`, `update`, `delete`.
+   - Types shared by a table's functions live in a `types.ts` in the same folder.
+   - Every function, not every file, takes `db: DbOrTx` as its first parameter, with no default. Callers pass the pool, or the `tx` inside `db.transaction(async (tx) => ...)`, so several queries can commit together.
+4. **The user makes design decisions, not the agent.** Whenever work reaches a fork (API shape, error model, wire contract, file/module layout, dependency choice, default values, naming of public symbols, behavior the spec does not pin down), stop and ask a clarifying question with the concrete options and their trade-offs before writing code. Do not pick a default silently and move on, and do not invent wire contracts (HTTP response bodies, headers, error strings) that the Gateway or `proto/` does not already define.
 
 ## 4. Writing Style (Docs, Issues, Comments)
 

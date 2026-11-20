@@ -9,6 +9,9 @@ export { DB_SCHEMAS, type DbSchema } from "./constants.js";
 
 export type Db = NodePgDatabase;
 
+/** The pool database, or the transaction object handed to the callback of db.transaction. */
+export type DbOrTx = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 export interface Database {
   db: Db;
   pool: pg.Pool;
