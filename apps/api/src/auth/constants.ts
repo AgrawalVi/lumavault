@@ -16,3 +16,6 @@ export const HOUSEHOLD_ROLES = [HOUSEHOLD_OWNER_ROLE, HOUSEHOLD_ADMIN_ROLE, HOUS
 export type HouseholdRole = (typeof HOUSEHOLD_ROLES)[number];
 
 export const PASSKEY_RP_NAME = "LumaVault";
+
+// Better Auth routes clients may never call. IamService does these actions server-side.
+export const LOCKED_AUTH_PREFIXES = ["/organization/", "/admin/"] as const;

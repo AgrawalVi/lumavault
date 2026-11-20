@@ -1,5 +1,6 @@
 import { passkey } from "@better-auth/passkey";
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin, bearer, magicLink, organization } from "better-auth/plugins";
 import type { Db } from "#/db/index.js";
@@ -11,6 +12,7 @@ import {
   SUPER_ADMIN_ROLE,
 } from "./constants.js";
 import { householdAccess, householdRoles } from "./roles.js";
+import { joinFromMemberInvite, signUpReason } from "./sign-up-gate.js";
 
 export interface MagicLinkMessage {
   email: string;
@@ -39,7 +41,7 @@ export interface AuthDeps {
   cookieDomain?: string;
 }
 
-/** Builds the Better Auth instance. Sign-up rules and household lockdown arrive in LUM-36. */
+/** Builds the Better Auth instance. Client access to household endpoints is locked in org-lockdown.ts. */
 export function createAuth(deps: AuthDeps) {
   return betterAuth({
     secret: deps.secret,
@@ -51,6 +53,22 @@ export function createAuth(deps: AuthDeps) {
     // No cookie cache: every request reads the session row, so bans and revocations apply at once.
     session: { cookieCache: { enabled: false } },
     advanced: deps.cookieDomain ? { crossSubDomainCookies: { enabled: true, domain: deps.cookieDomain } } : {},
+    // Sign-up is invite-only, matched by the invited email. This runs for every new account,
+    // including one a magic link creates. Member invites become memberships right away.
+    databaseHooks: {
+      user: {
+        create: {
+          async before(newUser) {
+            if (!(await signUpReason(deps.db, newUser.email))) {
+              throw new APIError("FORBIDDEN", { message: "sign-up is by invite only" });
+            }
+          },
+          async after(newUser) {
+            await joinFromMemberInvite(deps.db, newUser.id, newUser.email);
+          },
+        },
+      },
+    },
     plugins: [
       passkey({ rpID: deps.passkeyRpID, rpName: PASSKEY_RP_NAME, origin: deps.trustedOrigins }),
       magicLink({ sendMagicLink: (message) => deps.sendMagicLink(message) }),

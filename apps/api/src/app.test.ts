@@ -175,9 +175,8 @@ describe("loadModules", () => {
     await rm(bad, { recursive: true, force: true });
   });
 
-  it("finds nothing extra among the real source folders", async () => {
-    // Today no real module exists yet; helpers in src/auth must not be mistaken for one.
-    expect(await loadModules()).toEqual([]);
+  it("finds only real modules among the source folders, not helpers next to them", async () => {
+    expect((await loadModules()).map((m) => m.name)).toEqual(["auth-org-lockdown"]);
   });
 });
 
